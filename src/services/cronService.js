@@ -5,7 +5,7 @@ const { runDailyPostJob } = require("../jobs/dailyPostJob");
 let scheduledTask = null; // current active cron task ka reference
 
 /**
- * "HH:mm" (e.g. "18:00") ko cron expression me convert karta hai -> "0 18 * * *"
+ * "HH:mm" (e.g. "18:00") ko cron expression me convert karta hai -> "minute hour * * *"
  */
 const timeToCronExpression = (time) => {
   const [hour, minute] = time.split(":").map(Number);
@@ -14,36 +14,49 @@ const timeToCronExpression = (time) => {
 
 /**
  * Naya cron job schedule karta hai given time pe
- * Purana task hoga to pehle usko stop karta hai (taaki 2 jobs ek sath na chalein)
  */
 const scheduleJob = (time) => {
   if (scheduledTask) {
     scheduledTask.stop();
+    console.log(`[CRON SERVICE] Purani scheduled job ko stop kiya gaya.`);
   }
 
   const cronExpression = timeToCronExpression(time);
 
-  scheduledTask = cron.schedule(cronExpression, () => {
-    runDailyPostJob();
-  });
+  // 🎯 FIX: 'timezone' config add ki taaki Render UTC ke badle exact IST India time pe execute kare
+  scheduledTask = cron.schedule(
+    cronExpression, 
+    () => {
+      console.log(`[CRON] Time match hua! Triggering runDailyPostJob right now...`);
+      runDailyPostJob();
+    },
+    {
+      scheduled: true,
+      timezone: "Asia/Kolkata" // 🎯 Desi Indian Time Standard (IST)
+    }
+  );
 
-  console.log(`[CRON SERVICE] Job scheduled at ${time} daily (expression: "${cronExpression}")`);
+  console.log(`[CRON SERVICE] Job scheduled at ${time} daily (expression: "${cronExpression}") [Timezone: Asia/Kolkata]`);
 };
 
 /**
  * Server start hote hi ye call hoga - DB se saved time uthake job schedule karega
  */
 const initCronJob = async () => {
-  let settings = await Settings.findOne({ key: "app_settings" });
+  try {
+    let settings = await Settings.findOne({ key: "app_settings" });
 
-  if (!settings) {
-    settings = await Settings.create({
-      key: "app_settings",
-      cronTime: process.env.DEFAULT_CRON_TIME || "18:00",
-    });
+    if (!settings) {
+      settings = await Settings.create({
+        key: "app_settings",
+        cronTime: process.env.DEFAULT_CRON_TIME || "18:00",
+      });
+    }
+
+    scheduleJob(settings.cronTime);
+  } catch (err) {
+    console.error("❌ [CRON INIT ERROR]:", err.message);
   }
-
-  scheduleJob(settings.cronTime);
 };
 
 /**
