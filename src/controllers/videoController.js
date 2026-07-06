@@ -21,8 +21,6 @@ const uploadVideos = async (req, res) => {
     const errors = [];
 
     // Sequentially upload karte hain taaki Cloudinary free tier rate limit se bacha rahe
-    // (Parallel karna hai to Promise.all bhi kar sakte hain, lekin 100 files ek sath
-    // bhejne pe free tier throttle kar sakta hai)
     for (const file of files) {
       try {
         const uploadResult = await uploadVideoToCloudinary(
@@ -93,4 +91,37 @@ const deleteVideo = async (req, res) => {
   }
 };
 
-module.exports = { uploadVideos, getPendingVideos, deleteVideo };
+/**
+ * DELETE /api/videos/clear-queue
+ * 🎯 NAYA FEATURE: Saari pending/fetched videos ek sath delete karne ke liye
+ * Agar folder badal rahe ho, toh ye saara kachra saaf karega
+ */
+const clearVideoQueue = async (req, res) => {
+  try {
+    // 1. Pehle database me jitni bhi manual videos hain unka publicId nikal lo
+    const manualVideos = await Video.find({ source: "manual", cloudinaryPublicId: { $exists: true } });
+    
+    // 2. Cloudinary se manual videos ko sequential clear karo taaki space crash na ho
+    for (const vid of manualVideos) {
+      try {
+        await deleteVideoFromCloudinary(vid.cloudinaryPublicId);
+      } catch (cloudErr) {
+        console.error(`Cloudinary cleanup failed for ${vid.title}:`, cloudErr.message);
+      }
+    }
+
+    // 3. Ab poori collection ko database se khali kar do
+    const result = await Video.deleteMany({});
+
+    return res.json({
+      success: true,
+      message: `Queue poori tarah saaf! Total ${result.deletedCount} videos database aur Cloudinary se uda di gayi hain. Now ready for new folder.`
+    });
+  } catch (err) {
+    console.error("Error clearing video queue:", err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// 🎯 Export me clearVideoQueue ko add kar diya hai
+module.exports = { uploadVideos, getPendingVideos, deleteVideo, clearVideoQueue };
