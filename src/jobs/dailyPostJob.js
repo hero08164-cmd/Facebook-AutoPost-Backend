@@ -6,21 +6,15 @@ const { deleteVideoFromCloudinary } = require("../services/cloudinaryService");
 
 /**
  * Ye function daily cron job dwara call hoga (aur /api/schedule/run-now se manually bhi)
- *
- * Steps:
- * 1. Connected FB page nikalo
- * 2. Queue me se sabse purani pending video nikalo (FIFO - createdAt ascending)
- * 3. FB par post karo
- * 4. Success: manual hui to Cloudinary+Mongo se delete, drive hui to status="posted"
- * 5. History table me log karo
  */
 const runDailyPostJob = async () => {
   console.log(`\n[CRON] Daily post job start hua - ${new Date().toISOString()}`);
 
   try {
-    const fbAccount = await FacebookAccount.findOne({ connected: true });
+    // 🎯 FIX 1: 'connected' ko 'isConnected' kiya kyuki server.js me yahi store ho raha hai
+    const fbAccount = await FacebookAccount.findOne({ isConnected: true });
     if (!fbAccount) {
-      console.log("[CRON] Facebook account connected nahi hai. Job skip.");
+      console.log("[CRON] Facebook account connected nahi hai ya database me synced nahi hai. Job skip.");
       return;
     }
 
@@ -35,9 +29,10 @@ const runDailyPostJob = async () => {
     const videoUrl = video.source === "manual" ? video.cloudinaryUrl : video.driveWebViewLink;
 
     try {
+      // 🎯 FIX 2: 'fbAccount.pageAccessToken' ko badal kar 'fbAccount.accessToken' kiya jo sahi field hai
       const fbResponse = await postVideoToPage(
         fbAccount.pageId,
-        fbAccount.pageAccessToken,
+        fbAccount.accessToken, 
         videoUrl,
         video.title || ""
       );
@@ -46,20 +41,21 @@ const runDailyPostJob = async () => {
 
       // Cleanup / status update source ke hisab se
       if (video.source === "manual") {
-        // Manual video - post hone ke baad Cloudinary + MongoDB se delete
+        // Manual video - post hone ke baad Cloudinary space khali karo
         if (video.cloudinaryPublicId) {
           await deleteVideoFromCloudinary(video.cloudinaryPublicId).catch((e) =>
             console.error("[CRON] Cloudinary delete warning:", e.message)
           );
         }
-        await video.deleteOne();
-      } else {
-        // Drive video - delete nahi karni, sirf status update (repeat na ho isliye)
-        video.status = "posted";
-        video.postedAt = new Date();
-        await video.save();
       }
 
+      // 🎯 FIX 3: Video ko MongoDB se permanent DELETE karne ki jagah status="posted" karo,
+      // taaki Dashboard aur History section me iska data reference bana rahe aur crash na ho.
+      video.status = "posted";
+      video.postedAt = new Date();
+      await video.save();
+
+      // History collection me success state log karo
       await PostHistory.create({
         videoRef: video._id,
         videoTitle: video.title,
@@ -68,6 +64,7 @@ const runDailyPostJob = async () => {
         fbPostId: fbResponse.id,
         postedAt: new Date(),
       });
+
     } catch (postError) {
       // FB post fail hui (token expire, rate limit, invalid url, etc.)
       const errMsg = postError.response?.data?.error?.message || postError.message;
