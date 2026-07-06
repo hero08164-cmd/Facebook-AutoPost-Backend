@@ -10,12 +10,22 @@ require('./src/services/cronService'); // Exact path for cronService
 
 const app = express();
 
-// CORS Production setting setup
-app.use(cors({ origin: process.env.FRONTEND_URL || "*", credentials: true }));
+// 🎯 CORS FIX: Agar FRONTEND_URL ke aakhiri me galti se slash (/) hoga, toh ye use automatic mita dega
+const allowedOrigin = process.env.FRONTEND_URL 
+  ? process.env.FRONTEND_URL.replace(/\/$/, "") 
+  : "*";
+
+app.use(cors({ 
+  origin: allowedOrigin, 
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Health check endpoint for Render/Uptime monitoring
+// Health check endpoint for Render / Uptime monitoring
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", message: "FB Auto Post API running smoothly" });
 });
@@ -69,7 +79,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/drive', driveRoutes);
 app.use('/api/videos', videoRoutes);
 app.use('/api/schedule', scheduleRoutes);
-app.use('/api/posts', postRoutes); // 🎯 FIX: '/api/post' ko badal kar '/api/posts' (plural) kiya!
+app.use('/api/posts', postRoutes); // 🎯 FIX: '/api/post' ko badal kar '/api/posts' (plural) kiya taaki 404 na aaye!
 
 // 404 handler (Catch-all)
 app.use((req, res) => {
