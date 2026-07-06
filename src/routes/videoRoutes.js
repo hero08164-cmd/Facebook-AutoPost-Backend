@@ -11,5 +11,7 @@ const {
 router.post("/upload", upload.array("videos", 100), uploadVideos);
 router.get("/pending", getPendingVideos);
 router.delete("/:id", deleteVideo);
+// Is route ko baaki routes ke sath add kar do
+router.delete("/clear-queue", videoController.clearVideoQueue);
 
 module.exports = router;
