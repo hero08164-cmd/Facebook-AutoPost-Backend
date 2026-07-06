@@ -1,3 +1,4 @@
+// backend/src/jobs/dailyPostJob.js
 const Video = require("../models/Video");
 const FacebookAccount = require("../models/FacebookAccount");
 const PostHistory = require("../models/PostHistory");
@@ -11,33 +12,45 @@ const runDailyPostJob = async () => {
   console.log(`\n[CRON] Daily post job start hua - ${new Date().toISOString()}`);
 
   try {
-    // 🎯 FIX 1: 'connected' ko 'isConnected' kiya kyuki server.js me yahi store ho raha hai
-    const fbAccount = await FacebookAccount.findOne({ isConnected: true });
-    if (!fbAccount) {
-      console.log("[CRON] Facebook account connected nahi hai ya database me synced nahi hai. Job skip.");
+    // 🎯 FIX 1: Flexible $or condition lagayi taaki koi bhi true key ya pageId milte hi data sync ho jaye aur job skip na ho!
+    const fbAccount = await FacebookAccount.findOne({
+      $or: [
+        { isConnected: true },
+        { connected: true },
+        { pageId: { $exists: true, $ne: "" } }
+      ]
+    });
+
+    if (!fbAccount || !fbAccount.pageId) {
+      console.log("[CRON] ❌ Facebook account connected nahi hai ya database me synced nahi hai. Job skip.");
       return;
     }
+
+    console.log(`[CRON] ✅ Connected Facebook Page mila: ${fbAccount.pageName || fbAccount.pageId}`);
 
     // FIFO - sabse purani pending video
     const video = await Video.findOne({ status: "pending" }).sort({ createdAt: 1 });
 
     if (!video) {
-      console.log("[CRON] Koi pending video nahi mili. Aaj kuch post nahi hoga.");
+      console.log("[CRON] ⚠️ Koi pending video nahi mili. Aaj kuch post nahi hoga.");
       return;
     }
 
     const videoUrl = video.source === "manual" ? video.cloudinaryUrl : video.driveWebViewLink;
+    console.log(`[CRON] 🎬 Posting video: "${video.title}" | Source: ${video.source}`);
 
     try {
-      // 🎯 FIX 2: 'fbAccount.pageAccessToken' ko badal kar 'fbAccount.accessToken' kiya jo sahi field hai
+      // 🎯 FIX 2: Sahi token key uthayi (accessToken ya pageAccessToken jo bhi present ho)
+      const token = fbAccount.accessToken || fbAccount.pageAccessToken;
+
       const fbResponse = await postVideoToPage(
         fbAccount.pageId,
-        fbAccount.accessToken, 
+        token, 
         videoUrl,
         video.title || ""
       );
 
-      console.log(`[CRON] Video FB par post ho gayi. FB Post ID: ${fbResponse.id}`);
+      console.log(`[CRON] 🎉 Video FB par successfully post ho gayi. FB Post ID: ${fbResponse.id}`);
 
       // Cleanup / status update source ke hisab se
       if (video.source === "manual") {
@@ -49,8 +62,7 @@ const runDailyPostJob = async () => {
         }
       }
 
-      // 🎯 FIX 3: Video ko MongoDB se permanent DELETE karne ki jagah status="posted" karo,
-      // taaki Dashboard aur History section me iska data reference bana rahe aur crash na ho.
+      // 🎯 FIX 3: Video ko MongoDB se delete nahi kar rahe taaki reference safe rahe
       video.status = "posted";
       video.postedAt = new Date();
       await video.save();
@@ -68,7 +80,7 @@ const runDailyPostJob = async () => {
     } catch (postError) {
       // FB post fail hui (token expire, rate limit, invalid url, etc.)
       const errMsg = postError.response?.data?.error?.message || postError.message;
-      console.error("[CRON] FB post fail hui:", errMsg);
+      console.error("[CRON] ❌ FB post fail hui:", errMsg);
       console.error("[CRON] Full error detail:", JSON.stringify(postError.response?.data || postError.message, null, 2));
 
       video.status = "failed";
@@ -84,7 +96,7 @@ const runDailyPostJob = async () => {
       });
     }
   } catch (err) {
-    console.error("[CRON] Job me unexpected error:", err.message);
+    console.error("[CRON] 💥 Job me unexpected error:", err.message);
   }
 
   console.log("[CRON] Daily post job complete.\n");
