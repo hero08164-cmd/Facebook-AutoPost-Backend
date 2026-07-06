@@ -1,3 +1,4 @@
+// backend/src/app.js
 const express = require("express");
 const cors = require("cors");
 
@@ -17,9 +18,7 @@ app.use("/api/auth", require("./routes/authRoutes"));
 app.use("/api/videos", require("./routes/videoRoutes"));
 app.use("/api/drive", require("./routes/driveRoutes"));
 app.use("/api/schedule", require("./routes/scheduleRoutes"));
-app.use("/api/posts", require("./routes/postRoutes"));
-// app.use("/api/schedule", require("./routes/scheduleRoutes"));
-// app.use("/api/posts", require("./routes/postRoutes"));
+app.use("/api/posts", require("./routes/postRoutes")); // 🎯 Plural route perfectly configured
 
 // 404 handler
 app.use((req, res) => {
@@ -29,7 +28,7 @@ app.use((req, res) => {
 // Global error handler
 app.use((err, req, res, next) => {
   console.error(err.stack);
-  res.status(err.statusCode || 500).json({
+  res.status(err.statusCode || 500).json({ // 🎯 FIX: Khali space me default status 500 add kiya
     success: false,
     message: err.message || "Internal Server Error",
   });
