@@ -5,14 +5,13 @@ const PostHistory = require("../models/PostHistory");
 const { uploadVideoAsDraft, publishDraftVideo } = require("../services/facebookService");
 const { deleteVideoFromCloudinary } = require("../services/cloudinaryService");
 
-/**
- * Ye function daily cron job dwara call hoga (aur /api/schedule/run-now se manually bhi)
- */
+// 🎯 Helper function code ko rokne (wait karne) ke liye
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const runDailyPostJob = async () => {
   console.log(`\n[CRON] Daily post job start hua - ${new Date().toISOString()}`);
 
   try {
-    // 🎯 Facebook account fetch configuration
     const fbAccount = await FacebookAccount.findOne({
       $or: [
         { isConnected: true },
@@ -29,8 +28,6 @@ const runDailyPostJob = async () => {
     const token = fbAccount.accessToken || fbAccount.pageAccessToken;
     console.log(`[CRON] ✅ Connected Facebook Page mila: ${fbAccount.pageName || fbAccount.pageId}`);
 
-    // FIFO - Agli video nikalne ke liye query (Jo posted ya failed nahi hai)
-    // Hum pehle dhoondhenge jo 'uploading_draft' me ho ya 'pending' ho
     let video = await Video.findOne({ status: { $in: ["pending", "uploading_draft"] } }).sort({ createdAt: 1 });
 
     if (!video) {
@@ -42,9 +39,9 @@ const runDailyPostJob = async () => {
     const videoUrl = video.source === "manual" ? video.cloudinaryUrl : video.driveWebViewLink;
 
     try {
-      // 🔄 STAGE 1: Agar video pehle se FB par draft upload NAHI hui hai, toh pehle upload karo
+      // 🔄 STAGE 1: Agar video draft upload nahi hui hai, toh upload karo
       if (!video.isUploadedAsDraft || !fbVideoId) {
-        console.log(`[CRON] 🎬 Video pehle se Draft upload nahi thi. Background upload running for: "${video.title}"`);
+        console.log(`[CRON] 🎬 Video Draft upload running for: "${video.title}"`);
         
         video.status = "uploading_draft";
         await video.save();
@@ -55,14 +52,19 @@ const runDailyPostJob = async () => {
         video.fbVideoId = fbVideoId;
         video.isUploadedAsDraft = true;
         await video.save();
+
+        // 🎯 FIX: Badi videos (~112MB+) ke liye Facebook ko encode karne ka time chahiye!
+        // Agar hum turant publish marenge toh sirf text aayega, video nahi.
+        // Isliye hum yahan 5 MINUTE (300,000 ms) ka delay laga rahe hain taaki FB processing khatam kar le.
+        console.log(`⏳ [CRON] Video uploaded as draft. Waiting for 5 minutes for Facebook to finish background encoding...`);
+        await delay(600000); 
       }
 
-      // ⚡ STAGE 2: Video ab FB par draft hai. Ab ise instant PUBLIC karo!
-      console.log(`[CRON] 🚀 Video ready hai. Instant publishing Facebook Video ID: ${fbVideoId}`);
+      // ⚡ STAGE 2: Video ab processing queue se nikal chuki hogi. Now publish it!
+      console.log(`[CRON] 🚀 Triggering instant publish command for Video ID: ${fbVideoId}`);
       
       await publishDraftVideo(token, fbVideoId);
-
-      console.log(`🎉 [FB SUCCESS] Video is now LIVE on Facebook Page!`);
+      console.log(`🎉 [FB SUCCESS] Video is now LIVE on Facebook Page with layout!`);
 
       // Cleanup Cloudinary space if manual
       if (video.source === "manual" && video.cloudinaryPublicId) {
@@ -71,12 +73,10 @@ const runDailyPostJob = async () => {
         );
       }
 
-      // MongoDB update
       video.status = "posted";
       video.postedAt = new Date();
       await video.save();
 
-      // Log to history
       await PostHistory.create({
         videoRef: video._id,
         videoTitle: video.title,
