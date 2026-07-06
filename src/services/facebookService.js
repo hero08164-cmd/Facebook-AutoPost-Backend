@@ -63,14 +63,14 @@ const getUserPages = async (longLivedUserToken) => {
 };
 
 /**
- * Direct Multipart Binary Video Upload to Facebook Page 
- * (Sabse reliable method jo token validation check ke sath directly post karta hai)
+ * 🎯 SYSTEM 2.0 - STEP A: Video ko Facebook par DRAFT (Unpublished) upload karna
+ * Yeh video ko pehle se send karke rakh dega taaki encoding pehle hi complete ho jaye.
  */
-const postVideoToPage = async (pageId, pageAccessToken, videoUrl, description = "") => {
+const uploadVideoAsDraft = async (pageId, pageAccessToken, videoUrl, description = "") => {
   let finalPageId = pageId;
   let finalToken = pageAccessToken;
 
-  // 🛡️ Fallback database sync check
+  // Fallback database sync check
   if (!finalPageId || !finalToken) {
     const dbAccount = await FacebookAccount.findOne();
     if (dbAccount) {
@@ -83,9 +83,9 @@ const postVideoToPage = async (pageId, pageAccessToken, videoUrl, description = 
     throw new Error("Facebook Credentials completely missing or undefined!");
   }
 
-  console.log(`🚀 [FB DIRECT UPLOAD] Downloading video buffer for Page ID: ${finalPageId}`);
+  console.log(`🚀 [FB DRAFT UPLOAD] Downloading heavy movie clip buffer for Page ID: ${finalPageId}`);
 
-  // Step 1: Video buffer array download karo
+  // Video buffer array download karo
   const videoResponse = await axios.get(videoUrl, {
     responseType: "arraybuffer",
     maxContentLength: Infinity,
@@ -93,24 +93,24 @@ const postVideoToPage = async (pageId, pageAccessToken, videoUrl, description = 
   });
   const videoBuffer = Buffer.from(videoResponse.data);
 
-  console.log(`📥 [FB DIRECT UPLOAD] File downloaded. Size: ${(videoBuffer.length / (1024 * 1024)).toFixed(2)} MB. Creating Multipart Form...`);
+  console.log(`📥 [FB DRAFT UPLOAD] File cached. Size: ${(videoBuffer.length / (1024 * 1024)).toFixed(2)} MB. Formatting multipart form...`);
 
-  // Step 2: Form Data create karo direct dynamic multipart upload ke liye
   const FormData = require("form-data");
   const form = new FormData();
   form.append("access_token", finalToken);
   form.append("description", description);
-  form.append("title", description || "New Video Upload");
+  form.append("title", description || "New Movie Clip");
   
-  // Binary stream configuration directly attach karein
+  // ⚡ CRITICAL PARAMETER: Video upload hogi par page par public nahi hogi (Draft mode)
+  form.append("published", "false"); 
+
   form.append("source", videoBuffer, {
-    filename: `video_${Date.now()}.mp4`,
+    filename: `movie_clip_${Date.now()}.mp4`,
     contentType: "video/mp4",
   });
 
-  console.log(`📢 [FB DIRECT UPLOAD] Sending multipart stream directly to Facebook endpoint: ${FB_GRAPH_URL}/${finalPageId}/videos`);
+  console.log(`📢 [FB DRAFT UPLOAD] Sending multipart stream as DRAFT to Facebook...`);
 
-  // Step 3: Direct Graph API single hit call
   const { data } = await axios.post(
     `${FB_GRAPH_URL}/${finalPageId}/videos`,
     form,
@@ -121,8 +121,35 @@ const postVideoToPage = async (pageId, pageAccessToken, videoUrl, description = 
     }
   );
 
-  console.log(`🎉 [FB SUCCESS] Video posted directly! Post ID: ${data.id}`);
-  return data;
+  console.log(`✅ [FB DRAFT SUCCESS] Video uploaded as Draft! Facebook Video ID: ${data.id}`);
+  return data; // Returns { id: "facebook_video_id" }
+};
+
+/**
+ * 🎯 SYSTEM 2.0 - STEP B: Pehle se uploaded Draft video ko INSTANT PUBLIC karna
+ * Yeh exact 6:00 baje chalega aur bina kisi upload lag ke 1 second me video public kar dega!
+ */
+const publishDraftVideo = async (pageAccessToken, videoId) => {
+  let finalToken = pageAccessToken;
+
+  if (!finalToken) {
+    const dbAccount = await FacebookAccount.findOne();
+    if (dbAccount) finalToken = dbAccount.accessToken;
+  }
+
+  if (!finalToken || !videoId) {
+    throw new Error("Missing access token or videoId for instant publishing!");
+  }
+
+  console.log(`⚡ [FB INSTANT PUBLISH] Triggering public action for Video ID: ${videoId}`);
+
+  const { data } = await axios.post(`${FB_GRAPH_URL}/${videoId}`, {
+    published: true, // 🎯 COMMAND: Draft ko ab public karo!
+    access_token: finalToken,
+  });
+
+  console.log(`🎉 [FB PUBLISH SUCCESS] Video is now live on Page!`);
+  return data; // Returns { success: true }
 };
 
 module.exports = {
@@ -130,5 +157,6 @@ module.exports = {
   exchangeCodeForUserToken,
   getLongLivedUserToken,
   getUserPages,
-  postVideoToPage,
+  uploadVideoAsDraft, // Updated
+  publishDraftVideo,   // Added new
 };
