@@ -8,30 +8,12 @@ const FormData = require("form-data");
 
 const FB_GRAPH_URL = "https://graph.facebook.com/v21.0";
 
-/**
- * Normal Google Drive link ko direct downloadable streaming link me badalta hai
- */
-const formatDriveUrl = (url) => {
-  if (!url) return "";
-  if (url.includes("drive.google.com") && (url.includes("/view") || url.includes("id="))) {
-    let fileId = "";
-    if (url.includes("/d/")) {
-      fileId = url.split("/d/")[1].split("/")[0];
-    } else if (url.includes("id=")) {
-      fileId = url.split("id=")[1].split("&")[0];
-    }
-    if (fileId) {
-      return `https://docs.google.com/uc?export=download&id=${fileId}&confirm=t`;
-    }
-  }
-  return url;
-};
-
 const runDailyPostJob = async () => {
   console.log(`\n[CRON] Daily post job engine shuru hua - ${new Date().toISOString()}`);
-  let currentVideo = null; // Error scoping fix
+  let currentVideo = null;
 
   try {
+    // 1. Facebook Page Account Validation
     const fbAccount = await FacebookAccount.findOne({
       $or: [
         { isConnected: true },
@@ -48,52 +30,54 @@ const runDailyPostJob = async () => {
     const token = fbAccount.accessToken || fbAccount.pageAccessToken;
     console.log(`[CRON] ✅ Target Facebook Page Connection: ${fbAccount.pageName || fbAccount.pageId}`);
 
-    // Queue se pehli pending video uthao
-    currentVideo = await Video.findOne({ status: "pending" }).sort({ createdAt: 1 });
+    // 2. Queue se pehli pending video uthao (Cloudinary Manual Upload ko high priority)
+    currentVideo = await Video.findOne({ status: "pending", source: "manual" }).sort({ createdAt: 1 });
+
+    // Fallback: Agar manual nahi mili, toh normal pending uthao
+    if (!currentVideo) {
+      currentVideo = await Video.findOne({ status: "pending" }).sort({ createdAt: 1 });
+    }
 
     if (!currentVideo) {
       console.log("[CRON] ⚠️ Queue empty hai, koi pending video nahi mili.");
       return;
     }
 
-    // 🎯 URL Conversion Fallback Matrix
-    let initialUrl = currentVideo.source === "manual" ? currentVideo.cloudinaryUrl : currentVideo.driveWebViewLink;
-    const downloadUrl = formatDriveUrl(initialUrl);
+    // 🎯 Cloudinary Pure CDN URL Routing
+    const downloadUrl = currentVideo.source === "manual" ? currentVideo.cloudinaryUrl : currentVideo.driveWebViewLink;
 
-    console.log(`[CRON] 🎬 Heavy Processing Started for Video: "${currentVideo.title}"`);
-    console.log(`🚀 [BUFF ENGINE] Downloading movie clip buffer from remote node cloud...`);
+    console.log(`[CRON] 🎬 Processing Started for Video: "${currentVideo.title}" [Source: ${currentVideo.source}]`);
+    console.log(`🚀 [BUFF ENGINE] Streaming chunks from CDN network layer...`);
 
-    // 🚀 STEP 1: Direct Binary Stream Buffer Extraction
+    // 🚀 STEP 1: Fetch Raw MP4 Binary Chunks from Cloudinary CDN
     const videoResponse = await axios.get(downloadUrl, {
       responseType: "arraybuffer",
       maxContentLength: Infinity,
-      maxBodyLength: Infinity,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
+      maxBodyLength: Infinity
     });
     
     const videoBuffer = Buffer.from(videoResponse.data);
     const sizeInMB = (videoBuffer.length / (1024 * 1024)).toFixed(2);
-    console.log(`📥 [BUFF ENGINE] Memory cache success! Size: ${sizeInMB} MB.`);
+    console.log(`📥 [BUFF ENGINE] CDN Memory Cache Success! Real Size: ${sizeInMB} MB.`);
 
-    if (parseFloat(sizeInMB) <= 0.01) {
-      throw new Error("Google Drive Core Link HTML response return kar raha hai, actual mp4 download block hua.");
+    // Strict validation checkpoint
+    if (parseFloat(sizeInMB) <= 0.05) {
+      throw new Error(`Invalid video content buffer fetched (Size: ${sizeInMB} MB). Stream might be corrupted.`);
     }
 
-    // 🚀 STEP 2: Multipart payload data structure creation
+    // 🚀 STEP 2: Multi-part Payload structural packing
     const form = new FormData();
     form.append("access_token", token);
     form.append("description", currentVideo.title || "");
-    form.append("title", currentVideo.title || "Automated Video Update");
-    form.append("published", "true"); // Direct Feed Live mode
+    form.append("title", currentVideo.title || "Automated Production Update");
+    form.append("published", "true"); // Direct Feed Publication Loop
 
     form.append("source", videoBuffer, {
       filename: `fb_production_clip_${Date.now()}.mp4`,
-      contentType: "video/mp4",
+      contentType: "video/mp4"
     });
 
-    console.log(`📢 [FB LIVE ENGINE] Uploading massive stream chunks directly to Facebook servers...`);
+    console.log(`📢 [FB LIVE ENGINE] Uploading raw buffer directly to Meta infrastructure...`);
 
     const { data } = await axios.post(
       `${FB_GRAPH_URL}/${fbAccount.pageId}/videos`,
@@ -101,20 +85,21 @@ const runDailyPostJob = async () => {
       {
         headers: form.getHeaders(),
         maxContentLength: Infinity,
-        maxBodyLength: Infinity,
+        maxBodyLength: Infinity
       }
     );
 
     console.log(`🎉 [FB SUCCESS] Video successfully deployed & LIVE on Page feed! Video ID: ${data.id}`);
 
-    // Space management cleanup
+    // 🚀 STEP 3: Auto Clean Cloudinary Workspace (Storage space bachane ke liye)
     if (currentVideo.source === "manual" && currentVideo.cloudinaryPublicId) {
-      console.log(`🧹 [CLEANUP] Purging staging cache from Cloudinary...`);
+      console.log(`扫 [CLEANUP] Purging temporary storage from Cloudinary: ${currentVideo.cloudinaryPublicId}`);
       await deleteVideoFromCloudinary(currentVideo.cloudinaryPublicId).catch((e) =>
         console.error("[CRON] Cloudinary storage cleanup warning:", e.message)
       );
     }
 
+    // MongoDB Sync update
     currentVideo.status = "posted";
     currentVideo.postedAt = new Date();
     currentVideo.fbVideoId = data.id;
@@ -126,7 +111,7 @@ const runDailyPostJob = async () => {
       source: currentVideo.source,
       status: "success",
       fbPostId: data.id,
-      postedAt: new Date(),
+      postedAt: new Date()
     });
 
   } catch (postError) {
@@ -145,7 +130,7 @@ const runDailyPostJob = async () => {
       source: currentVideo?.source || "unknown",
       status: "failed",
       errorMessage: errMsg,
-      postedAt: new Date(),
+      postedAt: new Date()
     });
   }
 };
