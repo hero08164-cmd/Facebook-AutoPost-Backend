@@ -2,98 +2,88 @@
 const cron = require("node-cron");
 const Settings = require("../models/Settings");
 const { runDailyPostJob } = require("../jobs/dailyPostJob");
+const { runDriveToCloudinarySync } = require("../jobs/syncDriveToCloudinaryJob"); // ☀️ Morning Sync Import
 
-let scheduledTask = null; // Current active cron task ka reference
-let isJobRunning = false; // 🎯 LOCK SYSTEM: Taaki task process hote waqt overlap na ho
+let scheduledTask = null; // Current active evening cron
+let morningSyncTask = null; // ☀️ Subah ka task reference
+let isJobRunning = false;
 
-/**
- * "HH:mm" (e.g. "18:00") me se exact 20 minute minus karke background upload cron expression banata hai
- * Taaki 6:00 PM ke target ke liye processing exact 5:40 PM par automatically shuru ho jaye!
- */
 const timeToCronExpressionWith20MinBuffer = (time) => {
   let [hour, minute] = time.split(":").map(Number);
-
-  // 🎯 Heavy videos (up to 500MB+) ke liye 20 minute ka processing buffer offset minus karo
   minute = minute - 20;
-  
   if (minute < 0) {
-    minute = 60 + minute; // Minutes ko handle karne ke liye hour se borrow kiya
+    minute = 60 + minute;
     hour = hour - 1;
-    if (hour < 0) {
-      hour = 23; // Agar raat ke 12:10 se 20 min minus karein toh pichle din ka 11:50 PM ho jaye
-    }
+    if (hour < 0) hour = 23;
   }
-
-  return `${minute} ${hour} * * *`; // daily execution format
+  return `${minute} ${hour} * * *`;
 };
 
 /**
- * Naya cron job schedule karta hai given target public time se 20 minute pehle
+ * Dono Jobs ko schedule karne wala Master Engine
  */
 const scheduleJob = (targetTime) => {
+  // --- EVENING POST LOOP SHIFT ---
   if (scheduledTask) {
     scheduledTask.stop();
-    console.log(`[CRON SERVICE] Purani scheduled job ko stop kiya gaya.`);
+    console.log(`[CRON SERVICE] Purani scheduled evening job ko stop kiya gaya.`);
   }
 
-  // 🕒 20 minute pehle ka expression calculate karo
-  const cronExpression = timeToCronExpressionWith20MinBuffer(targetTime);
+  const eveningExpression = timeToCronExpressionWith20MinBuffer(targetTime);
 
   scheduledTask = cron.schedule(
-    cronExpression, 
+    eveningExpression, 
     async () => {
-      console.log(`\n[CRON] ⏰ 20-Minute Window Match Hua! Direct publish action triggered...`);
-      
-      if (isJobRunning) {
-        console.log(`[CRON SERVICE] ⚠️ Ek upload job pehle se process me hai. Is overlapping trigger ko skip kiya jata hai.`);
-        return;
-      }
-
+      console.log(`\n[CRON] ⏰ 20-Minute Window Match Hua! Evening publish action triggered...`);
+      if (isJobRunning) return;
       try {
         isJobRunning = true;
-        console.log(`🚀 [CRON ENGINE] 500MB+ buffer streaming initiated via network layer...`);
         await runDailyPostJob();
       } catch (error) {
         console.error(`[CRON SERVICE ERROR]:`, error.message);
       } finally {
         isJobRunning = false;
-        console.log(`[CRON SERVICE] Lock released. Ready for next schedule.`);
+        console.log(`[CRON SERVICE] Evening Lock released.`);
       }
     },
-    {
-      scheduled: true,
-      timezone: "Asia/Kolkata" // 🎯 India Time Standard (IST)
-    }
+    { scheduled: true, timezone: "Asia/Kolkata" }
   );
 
-  console.log(`[CRON SERVICE] 🎯 Target Live Goal: ${targetTime} | Background Upload Automatically Scheduled at Expression: "${cronExpression}" (20 Mins Earlier) [Timezone: Asia/Kolkata]`);
+  // --- ☀️ MORNING DRIVE TO CLOUDINARY SYNC LOOP (Sharp 08:00 AM IST) ---
+  if (morningSyncTask) {
+    morningSyncTask.stop();
+  }
+
+  morningSyncTask = cron.schedule(
+    "0 8 * * *", // Every single day sharp at 08:00 AM India Time
+    async () => {
+      console.log(`\n[CRON] ☀️ Sharp 8:00 AM Ho Gaya! Starting Google Drive Auto-Sync...`);
+      await runDriveToCloudinarySync();
+    },
+    { scheduled: true, timezone: "Asia/Kolkata" }
+  );
+
+  console.log(`[CRON SERVICE] ☀️ Morning Drive-Sync locked daily at: "08:00 AM" [IST]`);
+  console.log(`[CRON SERVICE] 🎯 Target Live Goal: ${targetTime} | Background Upload Scheduled at Expression: "${eveningExpression}" (20 Mins Earlier) [Timezone: Asia/Kolkata]`);
 };
 
-/**
- * Server start hote hi ye call hoga - DB se saved time uthake job schedule karega
- */
 const initCronJob = async () => {
   try {
     let settings = await Settings.findOne({ key: "app_settings" });
-
     if (!settings) {
       settings = await Settings.create({
         key: "app_settings",
-        cronTime: process.env.DEFAULT_CRON_TIME || "18:00", // Default shaam ke 6:00 baje live ka goal
+        cronTime: process.env.DEFAULT_CRON_TIME || "18:00", 
       });
     }
-
     scheduleJob(settings.cronTime);
   } catch (err) {
     console.error("❌ [CRON INIT ERROR]:", err.message);
   }
 };
 
-/**
- * Frontend se time change hone par call hoga - job ko naye time pe re-schedule karta hai
- */
 const rescheduleJob = (newTime) => {
-  console.log(`[CRON SERVICE] Rescheduling triggered from panel for Target Time: ${newTime}`);
+  console.log(`[CRON SERVICE] Panel rescheduling triggered for target: ${newTime}`);
   scheduleJob(newTime);
 };
 
