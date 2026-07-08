@@ -7,25 +7,28 @@ let scheduledTask = null; // Current active cron task ka reference
 let isJobRunning = false; // 🎯 LOCK SYSTEM: Taaki task process hote waqt overlap na ho
 
 /**
- * "HH:mm" (e.g. "18:00") ko uthakar exact 1 ghanta pehle (-1 hour) ka cron expression banata hai
- * Taaki 6:00 PM ke post ke liye upload exact 5:00 PM baje automatic shuru ho jaye!
+ * "HH:mm" (e.g. "18:00") me se exact 20 minute minus karke background upload cron expression banata hai
+ * Taaki 6:00 PM ke target ke liye processing exact 5:40 PM par automatically shuru ho jaye!
  */
-const timeToCronExpressionWithOffset = (time) => {
+const timeToCronExpressionWith20MinBuffer = (time) => {
   let [hour, minute] = time.split(":").map(Number);
 
-  // Exact 1 ghante ka offset minus karo upload background processing ke liye
-  hour = hour - 1;
-
-  // Agar hour minus me chala jaye (e.g. Night 00:30 - 1 hour = 23:30)
-  if (hour < 0) {
-    hour = 24 + hour;
+  // 🎯 Heavy videos (up to 500MB+) ke liye 20 minute ka processing buffer offset minus karo
+  minute = minute - 20;
+  
+  if (minute < 0) {
+    minute = 60 + minute; // Minutes ko handle karne ke liye hour se borrow kiya
+    hour = hour - 1;
+    if (hour < 0) {
+      hour = 23; // Agar raat ke 12:10 se 20 min minus karein toh pichle din ka 11:50 PM ho jaye
+    }
   }
 
-  return `${minute} ${hour} * * *`; // daily at (targetHour - 1):minute
+  return `${minute} ${hour} * * *`; // daily execution format
 };
 
 /**
- * Naya cron job schedule karta hai given target public time se 1 hour pehle
+ * Naya cron job schedule karta hai given target public time se 20 minute pehle
  */
 const scheduleJob = (targetTime) => {
   if (scheduledTask) {
@@ -33,13 +36,13 @@ const scheduleJob = (targetTime) => {
     console.log(`[CRON SERVICE] Purani scheduled job ko stop kiya gaya.`);
   }
 
-  // 🕒 1 ghante pehle ka expression calculate karo
-  const cronExpression = timeToCronExpressionWithOffset(targetTime);
+  // 🕒 20 minute pehle ka expression calculate karo
+  const cronExpression = timeToCronExpressionWith20MinBuffer(targetTime);
 
   scheduledTask = cron.schedule(
     cronExpression, 
     async () => {
-      console.log(`[CRON] Time match hua for upload window!`);
+      console.log(`\n[CRON] ⏰ 20-Minute Window Match Hua! Direct publish action triggered...`);
       
       if (isJobRunning) {
         console.log(`[CRON SERVICE] ⚠️ Ek upload job pehle se process me hai. Is overlapping trigger ko skip kiya jata hai.`);
@@ -48,7 +51,7 @@ const scheduleJob = (targetTime) => {
 
       try {
         isJobRunning = true;
-        console.log(`🚀 [CRON ENGINE] Background upload process starting now...`);
+        console.log(`🚀 [CRON ENGINE] 500MB+ buffer streaming initiated via network layer...`);
         await runDailyPostJob();
       } catch (error) {
         console.error(`[CRON SERVICE ERROR]:`, error.message);
@@ -63,7 +66,7 @@ const scheduleJob = (targetTime) => {
     }
   );
 
-  console.log(`[CRON SERVICE] 🎯 Target Live Time: ${targetTime} | Background Upload Scheduled at Expression: "${cronExpression}" [Timezone: Asia/Kolkata]`);
+  console.log(`[CRON SERVICE] 🎯 Target Live Goal: ${targetTime} | Background Upload Automatically Scheduled at Expression: "${cronExpression}" (20 Mins Earlier) [Timezone: Asia/Kolkata]`);
 };
 
 /**
