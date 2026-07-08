@@ -1,138 +1,90 @@
-// backend/src/jobs/dailyPostJob.js
-const Video = require("../models/Video");
-const FacebookAccount = require("../models/FacebookAccount");
-const PostHistory = require("../models/PostHistory");
-const { deleteVideoFromCloudinary } = require("../services/cloudinaryService");
-const axios = require("axios");
-const FormData = require("form-data");
+// backend/src/services/cronService.js
+const cron = require("node-cron");
+const Settings = require("../models/Settings");
+const { runDailyPostJob } = require("../jobs/dailyPostJob");
+const { runDriveToCloudinarySync } = require("../jobs/syncDriveToCloudinaryJob"); // ☀️ Morning Sync Import
 
-const FB_GRAPH_URL = "https://graph.facebook.com/v21.0";
+let scheduledTask = null; // Current active evening cron
+let morningSyncTask = null; // ☀️ Subah ka task reference
+let isJobRunning = false;
 
-const runDailyPostJob = async () => {
-  console.log(`\n[CRON] Daily post job engine shuru hua - ${new Date().toISOString()}`);
-  let currentVideo = null;
+const timeToCronExpressionWith20MinBuffer = (time) => {
+  let [hour, minute] = time.split(":").map(Number);
+  minute = minute - 20;
+  if (minute < 0) {
+    minute = 60 + minute;
+    hour = hour - 1;
+    if (hour < 0) hour = 23;
+  }
+  return `${minute} ${hour} * * *`;
+};
 
-  try {
-    // 1. Facebook Page Account Validation
-    const fbAccount = await FacebookAccount.findOne({
-      $or: [
-        { isConnected: true },
-        { connected: true },
-        { pageId: { $exists: true, $ne: "" } }
-      ]
-    });
+/**
+ * Dono Jobs ko schedule karne wala Master Engine
+ */
+const scheduleJob = (targetTime) => {
+  // --- EVENING POST LOOP SHIFT ---
+  if (scheduledTask) {
+    scheduledTask.stop();
+    console.log(`[CRON SERVICE] Purani scheduled evening job ko stop kiya gaya.`);
+  }
 
-    if (!fbAccount || !fbAccount.pageId) {
-      console.log("[CRON] ❌ Facebook Page details database me nahi mili. Job skip.");
-      return;
-    }
+  const eveningExpression = timeToCronExpressionWith20MinBuffer(targetTime);
 
-    const token = fbAccount.accessToken || fbAccount.pageAccessToken;
-    console.log(`[CRON] ✅ Target Facebook Page Connection: ${fbAccount.pageName || fbAccount.pageId}`);
-
-    // 2. Queue se pehli pending video uthao (Cloudinary Manual Upload ko high priority)
-    currentVideo = await Video.findOne({ status: "pending", source: "manual" }).sort({ createdAt: 1 });
-
-    // Fallback: Agar manual nahi mili, toh normal pending uthao
-    if (!currentVideo) {
-      currentVideo = await Video.findOne({ status: "pending" }).sort({ createdAt: 1 });
-    }
-
-    if (!currentVideo) {
-      console.log("[CRON] ⚠️ Queue empty hai, koi pending video nahi mili.");
-      return;
-    }
-
-    // 🎯 Cloudinary Pure CDN URL Routing
-    const downloadUrl = currentVideo.source === "manual" ? currentVideo.cloudinaryUrl : currentVideo.driveWebViewLink;
-
-    console.log(`[CRON] 🎬 Processing Started for Video: "${currentVideo.title}" [Source: ${currentVideo.source}]`);
-    console.log(`🚀 [BUFF ENGINE] Streaming chunks from CDN network layer...`);
-
-    // 🚀 STEP 1: Fetch Raw MP4 Binary Chunks from Cloudinary CDN
-    const videoResponse = await axios.get(downloadUrl, {
-      responseType: "arraybuffer",
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity
-    });
-    
-    const videoBuffer = Buffer.from(videoResponse.data);
-    const sizeInMB = (videoBuffer.length / (1024 * 1024)).toFixed(2);
-    console.log(`📥 [BUFF ENGINE] CDN Memory Cache Success! Real Size: ${sizeInMB} MB.`);
-
-    // Strict validation checkpoint
-    if (parseFloat(sizeInMB) <= 0.05) {
-      throw new Error(`Invalid video content buffer fetched (Size: ${sizeInMB} MB). Stream might be corrupted.`);
-    }
-
-    // 🚀 STEP 2: Multi-part Payload structural packing
-    const form = new FormData();
-    form.append("access_token", token);
-    form.append("description", currentVideo.title || "");
-    form.append("title", currentVideo.title || "Automated Production Update");
-    form.append("published", "true"); // Direct Feed Publication Loop
-
-    form.append("source", videoBuffer, {
-      filename: `fb_production_clip_${Date.now()}.mp4`,
-      contentType: "video/mp4"
-    });
-
-    console.log(`📢 [FB LIVE ENGINE] Uploading raw buffer directly to Meta infrastructure...`);
-
-    const { data } = await axios.post(
-      `${FB_GRAPH_URL}/${fbAccount.pageId}/videos`,
-      form,
-      {
-        headers: form.getHeaders(),
-        maxContentLength: Infinity,
-        maxBodyLength: Infinity
+  scheduledTask = cron.schedule(
+    eveningExpression, 
+    async () => {
+      console.log(`\n[CRON] ⏰ 20-Minute Window Match Hua! Evening publish action triggered...`);
+      if (isJobRunning) return;
+      try {
+        isJobRunning = true;
+        await runDailyPostJob();
+      } catch (error) {
+        console.error(`[CRON SERVICE ERROR]:`, error.message);
+      } finally {
+        isJobRunning = false;
+        console.log(`[CRON SERVICE] Evening Lock released.`);
       }
-    );
+    },
+    { scheduled: true, timezone: "Asia/Kolkata" }
+  );
 
-    console.log(`🎉 [FB SUCCESS] Video successfully deployed & LIVE on Page feed! Video ID: ${data.id}`);
+  // --- ☀️ MORNING DRIVE TO CLOUDINARY SYNC LOOP (Sharp 08:00 AM IST) ---
+  if (morningSyncTask) {
+    morningSyncTask.stop();
+  }
 
-    // 🚀 STEP 3: Auto Clean Cloudinary Workspace (Storage space bachane ke liye)
-    if (currentVideo.source === "manual" && currentVideo.cloudinaryPublicId) {
-      console.log(`扫 [CLEANUP] Purging temporary storage from Cloudinary: ${currentVideo.cloudinaryPublicId}`);
-      await deleteVideoFromCloudinary(currentVideo.cloudinaryPublicId).catch((e) =>
-        console.error("[CRON] Cloudinary storage cleanup warning:", e.message)
-      );
+  morningSyncTask = cron.schedule(
+    "0 8 * * *", // Every single day sharp at 08:00 AM India Time
+    async () => {
+      console.log(`\n[CRON] ☀️ Sharp 8:00 AM Ho Gaya! Starting Google Drive Auto-Sync...`);
+      await runDriveToCloudinarySync();
+    },
+    { scheduled: true, timezone: "Asia/Kolkata" }
+  );
+
+  console.log(`[CRON SERVICE] ☀️ Morning Drive-Sync locked daily at: "08:00 AM" [IST]`);
+  console.log(`[CRON SERVICE] 🎯 Target Live Goal: ${targetTime} | Background Upload Scheduled at Expression: "${eveningExpression}" (20 Mins Earlier) [Timezone: Asia/Kolkata]`);
+};
+
+const initCronJob = async () => {
+  try {
+    let settings = await Settings.findOne({ key: "app_settings" });
+    if (!settings) {
+      settings = await Settings.create({
+        key: "app_settings",
+        cronTime: process.env.DEFAULT_CRON_TIME || "18:00", 
+      });
     }
-
-    // MongoDB Sync update
-    currentVideo.status = "posted";
-    currentVideo.postedAt = new Date();
-    currentVideo.fbVideoId = data.id;
-    await currentVideo.save();
-
-    await PostHistory.create({
-      videoRef: currentVideo._id,
-      videoTitle: currentVideo.title,
-      source: currentVideo.source,
-      status: "success",
-      fbPostId: data.id,
-      postedAt: new Date()
-    });
-
-  } catch (postError) {
-    const errMsg = postError.response?.data?.error?.message || postError.message;
-    console.error("[CRON CORE CRASH] ❌ API Layer failure:", errMsg);
-
-    if (currentVideo) {
-      currentVideo.status = "failed";
-      currentVideo.draftError = errMsg;
-      await currentVideo.save();
-    }
-
-    await PostHistory.create({
-      videoRef: currentVideo?._id || null,
-      videoTitle: currentVideo?.title || "Unknown Video",
-      source: currentVideo?.source || "unknown",
-      status: "failed",
-      errorMessage: errMsg,
-      postedAt: new Date()
-    });
+    scheduleJob(settings.cronTime);
+  } catch (err) {
+    console.error("❌ [CRON INIT ERROR]:", err.message);
   }
 };
 
-module.exports = { runDailyPostJob };
+const rescheduleJob = (newTime) => {
+  console.log(`[CRON SERVICE] Panel rescheduling triggered for target: ${newTime}`);
+  scheduleJob(newTime);
+};
+
+module.exports = { initCronJob, rescheduleJob };
