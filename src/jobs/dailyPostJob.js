@@ -8,8 +8,28 @@ const FormData = require("form-data");
 
 const FB_GRAPH_URL = "https://graph.facebook.com/v21.0";
 
+/**
+ * Normal Google Drive link ko direct downloadable streaming link me badalta hai
+ */
+const formatDriveUrl = (url) => {
+  if (!url) return "";
+  if (url.includes("drive.google.com") && (url.includes("/view") || url.includes("id="))) {
+    let fileId = "";
+    if (url.includes("/d/")) {
+      fileId = url.split("/d/")[1].split("/")[0];
+    } else if (url.includes("id=")) {
+      fileId = url.split("id=")[1].split("&")[0];
+    }
+    if (fileId) {
+      return `https://docs.google.com/uc?export=download&id=${fileId}&confirm=t`;
+    }
+  }
+  return url;
+};
+
 const runDailyPostJob = async () => {
   console.log(`\n[CRON] Daily post job engine shuru hua - ${new Date().toISOString()}`);
+  let currentVideo = null; // Error scoping fix
 
   try {
     const fbAccount = await FacebookAccount.findOne({
@@ -29,44 +49,52 @@ const runDailyPostJob = async () => {
     console.log(`[CRON] ✅ Target Facebook Page Connection: ${fbAccount.pageName || fbAccount.pageId}`);
 
     // Queue se pehli pending video uthao
-    let video = await Video.findOne({ status: "pending" }).sort({ createdAt: 1 });
+    currentVideo = await Video.findOne({ status: "pending" }).sort({ createdAt: 1 });
 
-    if (!video) {
+    if (!currentVideo) {
       console.log("[CRON] ⚠️ Queue empty hai, koi pending video nahi mili.");
       return;
     }
 
-    const videoUrl = video.source === "manual" ? video.cloudinaryUrl : video.driveWebViewLink;
-    console.log(`[CRON] 🎬 Heavy Processing Started for Video: "${video.title}"`);
+    // 🎯 URL Conversion Fallback Matrix
+    let initialUrl = currentVideo.source === "manual" ? currentVideo.cloudinaryUrl : currentVideo.driveWebViewLink;
+    const downloadUrl = formatDriveUrl(initialUrl);
 
-    // 🚀 STEP 1: Direct Binary Stream Buffer Extraction (Supports unlimited size chunks via network pipeline)
+    console.log(`[CRON] 🎬 Heavy Processing Started for Video: "${currentVideo.title}"`);
     console.log(`🚀 [BUFF ENGINE] Downloading movie clip buffer from remote node cloud...`);
-    const videoResponse = await axios.get(videoUrl, {
+
+    // 🚀 STEP 1: Direct Binary Stream Buffer Extraction
+    const videoResponse = await axios.get(downloadUrl, {
       responseType: "arraybuffer",
       maxContentLength: Infinity,
       maxBodyLength: Infinity,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
     });
+    
     const videoBuffer = Buffer.from(videoResponse.data);
+    const sizeInMB = (videoBuffer.length / (1024 * 1024)).toFixed(2);
+    console.log(`📥 [BUFF ENGINE] Memory cache success! Size: ${sizeInMB} MB.`);
 
-    console.log(`📥 [BUFF ENGINE] Memory cache success! Size: ${(videoBuffer.length / (1024 * 1024)).toFixed(2)} MB.`);
+    if (parseFloat(sizeInMB) <= 0.01) {
+      throw new Error("Google Drive Core Link HTML response return kar raha hai, actual mp4 download block hua.");
+    }
 
-    // 🚀 STEP 2: Multipart application data structure payload creation
+    // 🚀 STEP 2: Multipart payload data structure creation
     const form = new FormData();
     form.append("access_token", token);
-    form.append("description", video.title || "");
-    form.append("title", video.title || "Automated Video Update");
-    
-    // ⚡ DIRECT UNREJECTABLE LIVE MODE: Seedha permanent post feed par render karo
-    form.append("published", "true"); 
+    form.append("description", currentVideo.title || "");
+    form.append("title", currentVideo.title || "Automated Video Update");
+    form.append("published", "true"); // Direct Feed Live mode
 
     form.append("source", videoBuffer, {
       filename: `fb_production_clip_${Date.now()}.mp4`,
       contentType: "video/mp4",
     });
 
-    console.log(`📢 [FB LIVE ENGINE] Uploading massive stream chunks directly to Facebook servers... (This will absorb the 20-min window)`);
+    console.log(`📢 [FB LIVE ENGINE] Uploading massive stream chunks directly to Facebook servers...`);
 
-    // Core Facebook REST endpoint mapping execution
     const { data } = await axios.post(
       `${FB_GRAPH_URL}/${fbAccount.pageId}/videos`,
       form,
@@ -79,24 +107,23 @@ const runDailyPostJob = async () => {
 
     console.log(`🎉 [FB SUCCESS] Video successfully deployed & LIVE on Page feed! Video ID: ${data.id}`);
 
-    // 🚀 STEP 3: Space management cleanup for Cloudinary if manual upload
-    if (video.source === "manual" && video.cloudinaryPublicId) {
-      console.log(`🧹 [CLEANUP] Purging staging cache from Cloudinary: ${video.cloudinaryPublicId}`);
-      await deleteVideoFromCloudinary(video.cloudinaryPublicId).catch((e) =>
+    // Space management cleanup
+    if (currentVideo.source === "manual" && currentVideo.cloudinaryPublicId) {
+      console.log(`🧹 [CLEANUP] Purging staging cache from Cloudinary...`);
+      await deleteVideoFromCloudinary(currentVideo.cloudinaryPublicId).catch((e) =>
         console.error("[CRON] Cloudinary storage cleanup warning:", e.message)
       );
     }
 
-    // Local MongoDB state synchronization updates
-    video.status = "posted";
-    video.postedAt = new Date();
-    video.fbVideoId = data.id;
-    await video.save();
+    currentVideo.status = "posted";
+    currentVideo.postedAt = new Date();
+    currentVideo.fbVideoId = data.id;
+    await currentVideo.save();
 
     await PostHistory.create({
-      videoRef: video._id,
-      videoTitle: video.title,
-      source: video.source,
+      videoRef: currentVideo._id,
+      videoTitle: currentVideo.title,
+      source: currentVideo.source,
       status: "success",
       fbPostId: data.id,
       postedAt: new Date(),
@@ -106,16 +133,16 @@ const runDailyPostJob = async () => {
     const errMsg = postError.response?.data?.error?.message || postError.message;
     console.error("[CRON CORE CRASH] ❌ API Layer failure:", errMsg);
 
-    if (video) {
-      video.status = "failed";
-      video.draftError = errMsg;
-      await video.save();
+    if (currentVideo) {
+      currentVideo.status = "failed";
+      currentVideo.draftError = errMsg;
+      await currentVideo.save();
     }
 
     await PostHistory.create({
-      videoRef: video?._id,
-      videoTitle: video?.title || "Unknown Video",
-      source: video?.source || "unknown",
+      videoRef: currentVideo?._id || null,
+      videoTitle: currentVideo?.title || "Unknown Video",
+      source: currentVideo?.source || "unknown",
       status: "failed",
       errorMessage: errMsg,
       postedAt: new Date(),
