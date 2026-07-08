@@ -64,13 +64,11 @@ const getUserPages = async (longLivedUserToken) => {
 
 /**
  * 🎯 SYSTEM 2.0 - STEP A: Video ko Facebook par DRAFT (Unpublished) upload karna
- * Yeh video ko pehle se send karke rakh dega taaki encoding pehle hi complete ho jaye.
  */
 const uploadVideoAsDraft = async (pageId, pageAccessToken, videoUrl, description = "") => {
   let finalPageId = pageId;
   let finalToken = pageAccessToken;
 
-  // Fallback database sync check
   if (!finalPageId || !finalToken) {
     const dbAccount = await FacebookAccount.findOne();
     if (dbAccount) {
@@ -85,7 +83,6 @@ const uploadVideoAsDraft = async (pageId, pageAccessToken, videoUrl, description
 
   console.log(`🚀 [FB DRAFT UPLOAD] Downloading heavy movie clip buffer for Page ID: ${finalPageId}`);
 
-  // Video buffer array download karo
   const videoResponse = await axios.get(videoUrl, {
     responseType: "arraybuffer",
     maxContentLength: Infinity,
@@ -100,9 +97,7 @@ const uploadVideoAsDraft = async (pageId, pageAccessToken, videoUrl, description
   form.append("access_token", finalToken);
   form.append("description", description);
   form.append("title", description || "New Movie Clip");
-  
-  // ⚡ CRITICAL PARAMETER: Video upload hogi par page par public nahi hogi (Draft mode)
-  form.append("published", "false"); 
+  form.append("published", "false"); // Draft Mode
 
   form.append("source", videoBuffer, {
     filename: `movie_clip_${Date.now()}.mp4`,
@@ -122,12 +117,12 @@ const uploadVideoAsDraft = async (pageId, pageAccessToken, videoUrl, description
   );
 
   console.log(`✅ [FB DRAFT SUCCESS] Video uploaded as Draft! Facebook Video ID: ${data.id}`);
-  return data; // Returns { id: "facebook_video_id" }
+  return data;
 };
 
 /**
  * 🎯 SYSTEM 2.0 - STEP B: Pehle se uploaded Draft video ko INSTANT PUBLIC karna
- * Yeh exact 6:00 baje chalega aur bina kisi upload lag ke 1 second me video public kar dega!
+ * FIX: Token ko URL parameters me explicitly pass kiya hai taaki Permission block bypass ho jaye!
  */
 const publishDraftVideo = async (pageAccessToken, videoId) => {
   let finalToken = pageAccessToken;
@@ -143,13 +138,21 @@ const publishDraftVideo = async (pageAccessToken, videoId) => {
 
   console.log(`⚡ [FB INSTANT PUBLISH] Triggering public action for Video ID: ${videoId}`);
 
-  const { data } = await axios.post(`${FB_GRAPH_URL}/${videoId}`, {
-    published: true, // 🎯 COMMAND: Draft ko ab public karo!
-    access_token: finalToken,
-  });
+  // 🎯 FIX: Query string parameters me token bhejna aur 'is_published' use karna full-proof hai
+  const { data } = await axios.post(
+    `${FB_GRAPH_URL}/${videoId}`,
+    {
+      is_published: true // Command to make it live
+    },
+    {
+      params: {
+        access_token: finalToken // URL level authorization bypass
+      }
+    }
+  );
 
   console.log(`🎉 [FB PUBLISH SUCCESS] Video is now live on Page!`);
-  return data; // Returns { success: true }
+  return data; 
 };
 
 module.exports = {
@@ -157,6 +160,6 @@ module.exports = {
   exchangeCodeForUserToken,
   getLongLivedUserToken,
   getUserPages,
-  uploadVideoAsDraft, // Updated
-  publishDraftVideo,   // Added new
+  uploadVideoAsDraft,
+  publishDraftVideo,
 };
