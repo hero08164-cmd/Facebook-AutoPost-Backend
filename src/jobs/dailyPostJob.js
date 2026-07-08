@@ -2,11 +2,11 @@
 const Video = require("../models/Video");
 const FacebookAccount = require("../models/FacebookAccount");
 const PostHistory = require("../models/PostHistory");
-const { uploadVideoAsDraft, publishDraftVideo } = require("../services/facebookService");
 const { deleteVideoFromCloudinary } = require("../services/cloudinaryService");
+const axios = require("axios");
+const FormData = require("form-data");
 
-// 🎯 Helper function code ko rokne (wait karne) ke liye
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const FB_GRAPH_URL = "https://graph.facebook.com/v21.0";
 
 const runDailyPostJob = async () => {
   console.log(`\n[CRON] Daily post job start hua - ${new Date().toISOString()}`);
@@ -28,53 +28,78 @@ const runDailyPostJob = async () => {
     const token = fbAccount.accessToken || fbAccount.pageAccessToken;
     console.log(`[CRON] ✅ Connected Facebook Page mila: ${fbAccount.pageName || fbAccount.pageId}`);
 
-    let video = await Video.findOne({ status: { $in: ["pending", "uploading_draft"] } }).sort({ createdAt: 1 });
+    // Queue se ek pending video uthao (Bina draft loop me fase)
+    let video = await Video.findOne({ status: "pending" }).sort({ createdAt: 1 });
 
     if (!video) {
-      console.log("[CRON] ⚠️ Koi pending ya ready video nahi mili. Aaj kuch post nahi hoga.");
+      console.log("[CRON] ⚠️ Koi pending ya ready video nahi mila. Aaj kuch post nahi hoga.");
       return;
     }
 
-    let fbVideoId = video.fbVideoId;
     const videoUrl = video.source === "manual" ? video.cloudinaryUrl : video.driveWebViewLink;
+    console.log(`[CRON] 🎬 Native Scheduling running for: "${video.title}"`);
 
     try {
-      // 🔄 STAGE 1: Agar video draft upload nahi hui hai, toh upload karo
-      if (!video.isUploadedAsDraft || !fbVideoId) {
-        console.log(`[CRON] 🎬 Video Draft upload running for: "${video.title}"`);
-        
-        video.status = "uploading_draft";
-        await video.save();
+      // 🚀 STEP 1: Video File Buffer Extraction (Heavy File Buffer Stream)
+      console.log(`🚀 [BUFF ENGINE] Downloading heavy movie clip buffer from source...`);
+      const videoResponse = await axios.get(videoUrl, {
+        responseType: "arraybuffer",
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+      });
+      const videoBuffer = Buffer.from(videoResponse.data);
 
-        const draftResponse = await uploadVideoAsDraft(fbAccount.pageId, token, videoUrl, video.title || "");
-        
-        fbVideoId = draftResponse.id;
-        video.fbVideoId = fbVideoId;
-        video.isUploadedAsDraft = true;
-        await video.save();
+      console.log(`📥 [BUFF ENGINE] Cached successfully. Size: ${(videoBuffer.length / (1024 * 1024)).toFixed(2)} MB.`);
 
-        // 🎯 FIX: Badi videos (~112MB+) ke liye Facebook ko encode karne ka time chahiye!
-        // Agar hum turant publish marenge toh sirf text aayega, video nahi.
-        // Isliye hum yahan 5 MINUTE (300,000 ms) ka delay laga rahe hain taaki FB processing khatam kar le.
-        console.log(`⏳ [CRON] Video uploaded as draft. Waiting for 5 minutes for Facebook to finish background encoding...`);
-        await delay(600000); 
-      }
+      // 🕒 STEP 2: Time Epoch Seconds Calculation (Exact 1 Hour Delay)
+      // Jab ye shaam ko 5:00 baje chalega, toh automatic 6:00 baje ka time stamp banayega
+      const currentEpochSeconds = Math.floor(Date.now() / 1000);
+      const oneHourInSeconds = 3600; 
+      const scheduleTimestamp = currentEpochSeconds + oneHourInSeconds;
 
-      // ⚡ STAGE 2: Video ab processing queue se nikal chuki hogi. Now publish it!
-      console.log(`[CRON] 🚀 Triggering instant publish command for Video ID: ${fbVideoId}`);
+      console.log(`⏳ [SCHEDULER] Targeting Facebook Auto-Live Epoch: ${scheduleTimestamp}`);
+
+      // 🚀 STEP 3: Multi-part Payload Request Construction
+      const form = new FormData();
+      form.append("access_token", token);
+      form.append("description", video.title || "");
+      form.append("title", video.title || "Automated Movie Clip");
       
-      await publishDraftVideo(token, fbVideoId);
-      console.log(`🎉 [FB SUCCESS] Video is now LIVE on Facebook Page with layout!`);
+      // ⚡ NATIVE INSTRUCTIONS: Facebook server ko background configuration bhejna
+      form.append("published", "false"); // Abhi direct page feed par mat dikhao
+      form.append("scheduled_publish_time", scheduleTimestamp.toString()); // Exact 1 ghante baad public karo
 
-      // Cleanup Cloudinary space if manual
+      form.append("source", videoBuffer, {
+        filename: `clip_${Date.now()}.mp4`,
+        contentType: "video/mp4",
+      });
+
+      console.log(`📢 [FB BULK UPLOAD] Sending multipart stream to Facebook API...`);
+
+      const { data } = await axios.post(
+        `${FB_GRAPH_URL}/${fbAccount.pageId}/videos`,
+        form,
+        {
+          headers: form.getHeaders(),
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity,
+        }
+      );
+
+      console.log(`🎉 [FB SUCCESS] Video uploaded & native scheduled successfully! Video ID: ${data.id}`);
+
+      // Cleanup Cloudinary space right away if source is manual
       if (video.source === "manual" && video.cloudinaryPublicId) {
+        console.log(`🧹 [CLEANUP] Deleting temporary source from Cloudinary...`);
         await deleteVideoFromCloudinary(video.cloudinaryPublicId).catch((e) =>
           console.error("[CRON] Cloudinary delete warning:", e.message)
         );
       }
 
+      // Local tracking database states sync
       video.status = "posted";
       video.postedAt = new Date();
+      video.fbVideoId = data.id;
       await video.save();
 
       await PostHistory.create({
@@ -82,7 +107,7 @@ const runDailyPostJob = async () => {
         videoTitle: video.title,
         source: video.source,
         status: "success",
-        fbPostId: fbVideoId,
+        fbPostId: data.id,
         postedAt: new Date(),
       });
 
