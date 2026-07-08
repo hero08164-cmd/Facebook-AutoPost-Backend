@@ -1,73 +1,90 @@
-// backend/src/jobs/syncDriveToCloudinaryJob.js
-const Video = require("../models/Video");
-const { uploadVideoToCloudinary } = require("../services/cloudinaryService");
-const axios = require("axios");
+// backend/src/services/cronService.js
+const cron = require("node-cron");
+const Settings = require("../models/Settings");
+const { runDailyPostJob } = require("../jobs/dailyPostJob");
+const { runDriveToCloudinarySync } = require("../jobs/syncDriveToCloudinaryJob"); // ☀️ Morning Sync Import
 
-/**
- * Google Drive raw download link formatting layer (No circular imports here)
- */
-const formatDriveUrl = (url) => {
-  if (!url) return "";
-  if (url.includes("drive.google.com")) {
-    let fileId = "";
-    if (url.includes("/d/")) fileId = url.split("/d/")[1].split("/")[0];
-    else if (url.includes("id=")) fileId = url.split("id=")[1].split("&")[0];
-    
-    if (fileId) return `https://docs.google.com/uc?export=download&id=${fileId}&confirm=t`;
+let scheduledTask = null; // Current active evening cron
+let morningSyncTask = null; // ☀️ Subah ka task reference
+let isJobRunning = false;
+
+const timeToCronExpressionWith20MinBuffer = (time) => {
+  let [hour, minute] = time.split(":").map(Number);
+  minute = minute - 20;
+  if (minute < 0) {
+    minute = 60 + minute;
+    hour = hour - 1;
+    if (hour < 0) hour = 23;
   }
-  return url;
+  return `${minute} ${hour} * * *`;
 };
 
 /**
- * Isolated core task loop - executes independently from cron service setup
+ * Dono Jobs ko schedule karne wala Master Engine
  */
-const runDriveToCloudinarySync = async () => {
-  console.log(`\n[MORNING SYNC] ☀️ Google Drive to Cloudinary Sync started - ${new Date().toISOString()}`);
+const scheduleJob = (targetTime) => {
+  // --- EVENING POST LOOP SHIFT ---
+  if (scheduledTask) {
+    scheduledTask.stop();
+    console.log(`[CRON SERVICE] Purani scheduled evening job ko stop kiya gaya.`);
+  }
 
-  try {
-    // Database check for pending drive entries
-    const video = await Video.findOne({ status: "pending", source: "drive" }).sort({ createdAt: 1 });
+  const eveningExpression = timeToCronExpressionWith20MinBuffer(targetTime);
 
-    if (!video) {
-      console.log("[MORNING SYNC] 😎 Aaj ke liye koi pending Google Drive video nahi mili.");
-      return;
-    }
-
-    console.log(`[MORNING SYNC] 🎬 Staging detected for Drive Video: "${video.title}"`);
-    const targetDownloadUrl = formatDriveUrl(video.driveWebViewLink);
-
-    console.log(`🚀 [SYNC ENGINE] Downloading raw buffer from Google Drive...`);
-    const response = await axios.get(targetDownloadUrl, {
-      responseType: "arraybuffer",
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+  scheduledTask = cron.schedule(
+    eveningExpression, 
+    async () => {
+      console.log(`\n[CRON] ⏰ 20-Minute Window Match Hua! Evening publish action triggered...`);
+      if (isJobRunning) return;
+      try {
+        isJobRunning = true;
+        await runDailyPostJob();
+      } catch (error) {
+        console.error(`[CRON SERVICE ERROR]:`, error.message);
+      } finally {
+        isJobRunning = false;
+        console.log(`[CRON SERVICE] Evening Lock released.`);
       }
-    });
+    },
+    { scheduled: true, timezone: "Asia/Kolkata" }
+  );
 
-    const buffer = Buffer.from(response.data);
-    console.log(`📥 [SYNC ENGINE] Drive Buffer Fetched. Size: ${(buffer.length / (1024 * 1024)).toFixed(2)} MB.`);
+  // --- ☀️ MORNING DRIVE TO CLOUDINARY SYNC LOOP (Sharp 06:00 AM IST) ---
+  if (morningSyncTask) {
+    morningSyncTask.stop();
+  }
 
-    console.log(`📤 [SYNC ENGINE] Uploading and caching directly to Cloudinary CDN server...`);
-    const base64Video = `data:video/mp4;base64,${buffer.toString("base64")}`;
-    const cloudinaryResult = await uploadVideoToCloudinary(base64Video); 
+  morningSyncTask = cron.schedule(
+    "0 6 * * *", // 🎯 Badlaav: Everyday sharp at 06:00 AM India Time
+    async () => {
+      console.log(`\n[CRON] ☀️ Sharp 6:00 AM Ho Gaya! Starting Google Drive Auto-Sync...`);
+      await runDriveToCloudinarySync();
+    },
+    { scheduled: true, timezone: "Asia/Kolkata" }
+  );
 
-    if (cloudinaryResult && cloudinaryResult.secure_url) {
-      video.source = "manual";
-      video.cloudinaryUrl = cloudinaryResult.secure_url;
-      video.cloudinaryPublicId = cloudinaryResult.public_id;
-      await video.save();
+  console.log(`[CRON SERVICE] ☀️ Morning Drive-Sync locked daily at: "06:00 AM" [IST]`);
+  console.log(`[CRON SERVICE] 🎯 Target Live Goal: ${targetTime} | Background Upload Scheduled at Expression: "${eveningExpression}" (20 Mins Earlier) [Timezone: Asia/Kolkata]`);
+};
 
-      console.log(`🎉 [SYNC SUCCESS] Drive Video is now safely staged on Cloudinary CDN!`);
-    } else {
-      throw new Error("Cloudinary did not return a valid secure secure_url");
+const initCronJob = async () => {
+  try {
+    let settings = await Settings.findOne({ key: "app_settings" });
+    if (!settings) {
+      settings = await Settings.create({
+        key: "app_settings",
+        cronTime: process.env.DEFAULT_CRON_TIME || "18:00", 
+      });
     }
-
-  } catch (error) {
-    console.error("[MORNING SYNC CRASH] ❌ Drive caching layer failed:", error.message);
+    scheduleJob(settings.cronTime);
+  } catch (err) {
+    console.error("❌ [CRON INIT ERROR]:", err.message);
   }
 };
 
-// 🎯 Export explicitly to prevent non-existent property warnings
-module.exports = { runDriveToCloudinarySync };
+const rescheduleJob = (newTime) => {
+  console.log(`[CRON SERVICE] Panel rescheduling triggered for target: ${newTime}`);
+  scheduleJob(newTime);
+};
+
+module.exports = { initCronJob, rescheduleJob };
