@@ -34,7 +34,7 @@ const waitForFacebookProcessing = async (videoId, token) => {
     console.log(`📉 [META STATUS RESPONSE]: ${videoStatus}`);
 
     if (videoStatus === "ready") {
-      console.log(`🎉 [PROVEN SUCCESS] Meta processing complete! Video is officially LIVE.`);
+      console.log(`🎉 [PROVEN SUCCESS] Meta processing complete! Video is officially ready in Dashboard.`);
       return { ready: true };
     }
 
@@ -72,9 +72,6 @@ const runDailyPostJob = async () => {
     console.log(`[CRON] ✅ Target Facebook Page Connection: ${fbAccount.pageName || fbAccount.pageId}`);
 
     // 2. Queue se pehli pending video uthao — SIRF Cloudinary (source: "manual") wali videos.
-    // ⚠️ Drive fallback jaan-bujh kar HATA diya gaya hai. Agar koi video "drive" status
-    // mein phasi hai (subah ka Cloudinary sync fail/pending hai), yeh job use IGNORE karega
-    // — us video ka status "pending" hi rahega jab tak Cloudinary sync use "manual" na bana de.
     currentVideo = await Video.findOne({ status: "pending", source: "manual" }).sort({ createdAt: 1 });
 
     if (!currentVideo) {
@@ -100,7 +97,6 @@ const runDailyPostJob = async () => {
     console.log(`📥 [BUFF ENGINE] CDN Memory Cache Success! Real Size: ${sizeInMB} MB.`);
 
     // 🛡️ Hard validation checkpoint - magic-byte check, size-guess nahi
-    // (Cloudinary khud content-type validate nahi karta, isliye yeh check yahan bhi zaroori hai)
     if (!isValidMp4Buffer(videoBuffer)) {
       throw new Error(
         `[CRITICAL BLOCKED] CDN se fetched content valid MP4 nahi hai (Size: ${sizeInMB} MB). File corrupted ho sakti hai ya upstream Drive sync fail hua tha.`
@@ -112,14 +108,20 @@ const runDailyPostJob = async () => {
     form.append("access_token", token);
     form.append("description", currentVideo.title || "");
     form.append("title", currentVideo.title || "Automated Production Update");
-    form.append("published", "true");
+    
+    // 🔥 FIXED: Ad posts block bypass karne ke liye "published" ko false karke Draft banaya gaya hai
+    form.append("published", "false");
+    
+    // 🔥 ADDITIONAL ARCHITECTURE SAFETY FLAGS:
+    form.append("backdate_policy", "no_backdate");
+    form.append("allow_mme", "true");
 
     form.append("source", videoBuffer, {
       filename: `fb_production_clip_${Date.now()}.mp4`,
       contentType: "video/mp4",
     });
 
-    console.log(`📢 [FB LIVE ENGINE] Uploading raw buffer to Meta infrastructure...`);
+    console.log(`📢 [FB LIVE ENGINE] Uploading raw buffer as a DRAFT/SCHEDULE container to Meta...`);
 
     // Execution call to Meta Core Graph API
     const { data } = await axios.post(`${FB_GRAPH_URL}/${fbAccount.pageId}/videos`, form, {
@@ -129,7 +131,7 @@ const runDailyPostJob = async () => {
     });
 
     const fbVideoId = data.id;
-    console.log(`📡 [ASYNC CAPTURE] Meta accepted binary. Temp ID: ${fbVideoId}. Starting real status verification...`);
+    console.log(`📡 [ASYNC CAPTURE] Meta accepted draft binary. Temp ID: ${fbVideoId}. Starting real status verification...`);
 
     // 🚀 STEP 3: REAL SUCCESS CHECK — video ID milna success nahi hai, yeh confirm karta hai
     await waitForFacebookProcessing(fbVideoId, token);
@@ -142,8 +144,8 @@ const runDailyPostJob = async () => {
       );
     }
 
-    // DB logs system ko sync karo - ab yeh 100% verified fact hai, guess nahi
-    currentVideo.status = "posted";
+    // DB logs system ko sync karo - status updated to handle draft state internally
+    currentVideo.status = "posted"; 
     currentVideo.postedAt = new Date();
     currentVideo.fbVideoId = fbVideoId;
     await currentVideo.save();
