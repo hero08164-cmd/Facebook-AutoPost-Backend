@@ -110,6 +110,11 @@ const runDraftUploadJob = async () => {
     form.append("title", currentVideo.title || "Scheduled Upload");
     form.append("published", "false"); // 🎯 DRAFT MODE — abhi public nahi hoga
 
+    // 🔥 FIX FOR "AD POSTS" CONTAINER: Force Meta to handle this as a standard page draft reel
+    form.append("video_state", "DRAFT");
+    form.append("reel_placement", "facebook_reels");
+    form.append("backdate_policy", "no_backdate");
+
     form.append("source", videoBuffer, {
       filename: `fb_draft_clip_${Date.now()}.mp4`,
       contentType: "video/mp4",
