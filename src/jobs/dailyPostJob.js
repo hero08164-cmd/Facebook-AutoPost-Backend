@@ -71,27 +71,25 @@ const runDailyPostJob = async () => {
     const token = fbAccount.accessToken || fbAccount.pageAccessToken;
     console.log(`[CRON] ✅ Target Facebook Page Connection: ${fbAccount.pageName || fbAccount.pageId}`);
 
-    // 2. Queue se pehli pending video uthao (Cloudinary Staging/Manual ko priority milegi)
+    // 2. Queue se pehli pending video uthao — SIRF Cloudinary (source: "manual") wali videos.
+    // ⚠️ Drive fallback jaan-bujh kar HATA diya gaya hai. Agar koi video "drive" status
+    // mein phasi hai (subah ka Cloudinary sync fail/pending hai), yeh job use IGNORE karega
+    // — us video ka status "pending" hi rahega jab tak Cloudinary sync use "manual" na bana de.
     currentVideo = await Video.findOne({ status: "pending", source: "manual" }).sort({ createdAt: 1 });
 
-    // Fallback: Agar subah sync me koi issue hua ho aur source "drive" hi reh gaya ho
     if (!currentVideo) {
-      currentVideo = await Video.findOne({ status: "pending" }).sort({ createdAt: 1 });
-    }
-
-    if (!currentVideo) {
-      console.log("[CRON] ⚠️ Queue empty hai, koi pending video nahi mili.");
+      console.log(
+        "[CRON] ⚠️ Cloudinary queue empty hai (koi 'manual' source pending video nahi mili). " +
+          "Agar Drive se videos pending pade hain, unka subah ka Cloudinary sync check karo."
+      );
       return;
     }
 
-    // 🎯 Target Cloudinary/CDN URL Setup
-    const downloadUrl = currentVideo.source === "manual" ? currentVideo.cloudinaryUrl : currentVideo.driveWebViewLink;
-
     console.log(`[CRON] 🎬 Processing Started for Video: "${currentVideo.title}" [Source: ${currentVideo.source}]`);
-    console.log(`🚀 [BUFF ENGINE] Streaming video chunks from CDN network layer...`);
+    console.log(`🚀 [BUFF ENGINE] Streaming video chunks from Cloudinary CDN...`);
 
-    // 🚀 STEP 1: Fetch Raw Binary Chunks from Cloudinary CDN
-    const videoResponse = await axios.get(downloadUrl, {
+    // 🚀 STEP 1: Fetch Raw Binary Chunks — hamesha Cloudinary se, kabhi Drive se nahi
+    const videoResponse = await axios.get(currentVideo.cloudinaryUrl, {
       responseType: "arraybuffer",
       maxContentLength: Infinity,
       maxBodyLength: Infinity,
@@ -137,7 +135,7 @@ const runDailyPostJob = async () => {
     await waitForFacebookProcessing(fbVideoId, token);
 
     // 🚀 STEP 4: Auto Clean Cloudinary Workspace (sirf ab jab confirm ho gaya video live hai)
-    if (currentVideo.source === "manual" && currentVideo.cloudinaryPublicId) {
+    if (currentVideo.cloudinaryPublicId) {
       console.log(`🧹 [CLEANUP] Purging temporary storage from Cloudinary: ${currentVideo.cloudinaryPublicId}`);
       await deleteVideoFromCloudinary(currentVideo.cloudinaryPublicId).catch((e) =>
         console.error("[CRON] Cloudinary storage cleanup warning:", e.message)
