@@ -1,3 +1,4 @@
+// backend/src/services/driveService.js
 const { google } = require("googleapis");
 const axios = require("axios");
 const { oauth2Client, SCOPES, getDriveClient } = require("../config/googleDrive");
@@ -57,16 +58,17 @@ const listVideosInFolder = async (refreshToken, folderId) => {
   const drive = getDriveClient(refreshToken);
   const { data } = await drive.files.list({
     q: `'${folderId}' in parents and mimeType contains 'video/' and trashed=false`,
-    fields: "files(id, name, mimeType, webViewLink, createdTime)",
+    fields: "files(id, name, mimeType, webViewLink, createdTime, size)",
     pageSize: 1000,
   });
   return data.files;
 };
 
 /**
- * Video file ko "Anyone with link can view" bana do
- * Zaroori hai kyunki Facebook Graph API file_url se video fetch karta hai -
- * agar file private hui to FB usko download nahi kar payega
+ * ⚠️ DEPRECATED / OPTIONAL: Video file ko "Anyone with link can view" banata hai.
+ * Ab is function ki zaroorat NAHI hai naye flow mein, kyunki hum authenticated
+ * Drive API (downloadFileBuffer) se seedha binary download karte hain -
+ * file ko public karna hi nahi padta. Sirf backward-compatibility ke liye rakha hai.
  */
 const makeFilePublic = async (refreshToken, fileId) => {
   const drive = getDriveClient(refreshToken);
@@ -77,10 +79,28 @@ const makeFilePublic = async (refreshToken, fileId) => {
 };
 
 /**
- * Public direct-download link banata hai jo Facebook ko diya ja sakta hai
+ * ⚠️ DEPRECATED: Purana scraping-based public link. Naye flow mein use nahi hota.
  */
 const getDirectDownloadLink = (fileId) => {
   return `https://drive.google.com/uc?export=download&id=${fileId}`;
+};
+
+/**
+ * 🚀 NEW: Authenticated Google Drive API se seedha binary file content download karta hai.
+ * Yeh koi scraping/bypass nahi hai - yeh Drive ka official supported tareeka hai
+ * (files.get with alt:"media"). Isliye file ko public karne ki, cookie-jar ki,
+ * ya confirm-token nikalne ki koi zaroorat nahi padti - jab tak refreshToken
+ * wale account ki us file/folder tak access hai (owner ya shared-with-them hai).
+ */
+const downloadFileBuffer = async (refreshToken, fileId) => {
+  const drive = getDriveClient(refreshToken);
+
+  const response = await drive.files.get(
+    { fileId, alt: "media" },
+    { responseType: "arraybuffer" }
+  );
+
+  return Buffer.from(response.data);
 };
 
 module.exports = {
@@ -91,4 +111,5 @@ module.exports = {
   listVideosInFolder,
   makeFilePublic,
   getDirectDownloadLink,
+  downloadFileBuffer,
 };
