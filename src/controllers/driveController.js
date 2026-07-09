@@ -156,8 +156,8 @@ const processFolderInBackground = async (refreshToken, videos, folderName) => {
       }
 
       console.log(`[DRIVE SYNC] 📤 Uploading to Cloudinary: "${file.name}" (${sizeInMB} MB)...`);
-      const base64Video = `data:video/mp4;base64,${buffer.toString("base64")}`;
-      const cloudinaryResult = await uploadVideoToCloudinary(base64Video);
+      // ⚠️ uploadVideoToCloudinary raw Buffer + filename expect karta hai (base64 string nahi)
+      const cloudinaryResult = await uploadVideoToCloudinary(buffer, file.name);
 
       if (!cloudinaryResult?.secure_url) {
         throw new Error("Cloudinary ne valid secure_url return nahi kiya");
