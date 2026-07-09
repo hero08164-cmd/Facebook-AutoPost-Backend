@@ -8,9 +8,10 @@ const {
   getGoogleUserEmail,
   listDriveFolders,
   listVideosInFolder,
-  makeFilePublic,
-  getDirectDownloadLink,
+  downloadFileBuffer,
 } = require("../services/driveService");
+const { uploadVideoToCloudinary } = require("../services/cloudinaryService");
+const { isValidMp4Buffer } = require("../jobs/syncDriveToCloudinaryJob");
 
 /**
  * GET /api/drive/auth
@@ -124,8 +125,78 @@ const getVideosInFolder = async (req, res) => {
 };
 
 /**
+ * 🚀 CORE WORKER: Ek folder ki saari videos ko background me process karta hai -
+ * har video: Drive se authenticated download -> MP4 validate -> Cloudinary upload
+ * -> Video document seedha "manual" source ke saath banao.
+ * Yeh function AWAIT nahi kiya jaata selectFolder me (fire-and-forget), taaki
+ * HTTP request turant respond kar sake aur bade folders ke liye bhi request
+ * timeout na ho. Progress sirf server logs me dikhega.
+ */
+const processFolderInBackground = async (refreshToken, videos, folderName) => {
+  let addedCount = 0;
+  let skippedCount = 0;
+  let failedCount = 0;
+
+  console.log(`\n[DRIVE SYNC] 🚀 Background sync shuru: "${folderName}" — ${videos.length} videos mili.`);
+
+  for (const file of videos) {
+    try {
+      const existing = await Video.findOne({ driveFileId: file.id });
+      if (existing) {
+        skippedCount++;
+        continue;
+      }
+
+      console.log(`[DRIVE SYNC] 📥 Downloading (authenticated): "${file.name}"...`);
+      const buffer = await downloadFileBuffer(refreshToken, file.id);
+      const sizeInMB = (buffer.length / (1024 * 1024)).toFixed(2);
+
+      if (!isValidMp4Buffer(buffer)) {
+        throw new Error(`Downloaded content valid MP4 nahi hai (Size: ${sizeInMB} MB)`);
+      }
+
+      console.log(`[DRIVE SYNC] 📤 Uploading to Cloudinary: "${file.name}" (${sizeInMB} MB)...`);
+      const base64Video = `data:video/mp4;base64,${buffer.toString("base64")}`;
+      const cloudinaryResult = await uploadVideoToCloudinary(base64Video);
+
+      if (!cloudinaryResult?.secure_url) {
+        throw new Error("Cloudinary ne valid secure_url return nahi kiya");
+      }
+
+      // 🎯 Seedha "manual" source ke saath banao - "drive" status kabhi nahi banega
+      await Video.create({
+        source: "manual",
+        driveFileId: file.id,
+        driveFileName: file.name,
+        cloudinaryUrl: cloudinaryResult.secure_url,
+        cloudinaryPublicId: cloudinaryResult.public_id,
+        title: file.name,
+        status: "pending",
+      });
+
+      addedCount++;
+      console.log(`[DRIVE SYNC] ✅ Cloudinary pe ready: "${file.name}"`);
+    } catch (fileErr) {
+      failedCount++;
+      console.error(`[DRIVE SYNC] ❌ Failed: "${file.name}" — ${fileErr.message}`);
+      // Is file ko skip karke agli file pe chale jao, poora batch fail nahi hona chahiye
+    }
+  }
+
+  console.log(
+    `[DRIVE SYNC] 🎉 Background sync complete: "${folderName}" — Added: ${addedCount}, Skipped: ${skippedCount}, Failed: ${failedCount}\n`
+  );
+};
+
+/**
  * POST /api/drive/select-folder
  * Body: { folderId, folderName }
+ *
+ * 🎯 NAYA BEHAVIOUR: Folder select hote hi is-turant saari videos Drive se
+ * authenticated download hoke Cloudinary pe upload ho jaati hain. Queue mein
+ * ab kabhi raw "drive" status wali video nahi dikhegi - sirf Cloudinary-backed
+ * ("manual") videos dikhengi. Processing background me hoti hai isliye response
+ * turant aata hai; actual upload progress server logs me dikhega.
  */
 const selectFolder = async (req, res) => {
   try {
@@ -148,39 +219,16 @@ const selectFolder = async (req, res) => {
 
     const videos = await listVideosInFolder(account.refreshToken, folderId);
 
-    let addedCount = 0;
-    let skippedCount = 0;
-
-    for (const file of videos) {
-      const existing = await Video.findOne({ driveFileId: file.id });
-      if (existing) {
-        skippedCount++;
-        continue;
-      }
-
-      try {
-        await makeFilePublic(account.refreshToken, file.id);
-      } catch (pubErr) {
-        console.warn(`File ${file.id} public nahi ho payi, download bypass fallback trigger:`, pubErr.message);
-      }
-
-      await Video.create({
-        source: "drive",
-        driveFileId: file.id,
-        driveFileName: file.name,
-        driveWebViewLink: getDirectDownloadLink(file.id),
-        title: file.name,
-        status: "pending",
-      });
-
-      addedCount++;
-    }
-
+    // Turant respond karo — actual download+upload background me chalega
     res.json({
       success: true,
-      message: `Folder select ho gaya. ${addedCount} nayi videos queue me add hui, ${skippedCount} pehle se maujood thi (skip ki gayi).`,
-      addedCount,
-      skippedCount,
+      message: `Folder select ho gaya. ${videos.length} videos mili — yeh ab background me Cloudinary pe upload ho rahi hain. Kuch minute mein queue me dikhna shuru ho jaayengi.`,
+      totalFound: videos.length,
+    });
+
+    // Fire-and-forget: response bhej diya, ab yeh background me process hoga
+    processFolderInBackground(account.refreshToken, videos, folderName || "Google Drive Folder").catch((err) => {
+      console.error("[DRIVE SYNC] ❌ Background processing crash:", err.message);
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
