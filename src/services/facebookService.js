@@ -1,3 +1,4 @@
+// backend/src/services/facebookService.js
 const axios = require("axios");
 const FacebookAccount = require("../models/FacebookAccount");
 
@@ -63,7 +64,17 @@ const getUserPages = async (longLivedUserToken) => {
 };
 
 /**
- * 🎯 SYSTEM 2.0 - STEP A: Video ko Facebook par DRAFT (Unpublished) upload karna
+ * ⚠️ NOTE: uploadVideoAsDraft aur publishDraftVideo functions
+ * dailyPostJob.js ke current flow mein use NAHI ho rahe (wahan directly
+ * published:true ke saath single-step upload hota hai). Yeh functions
+ * standalone/manual draft-review workflow ke liye rakhe gaye hain
+ * (agar future mein manual approval step chahiye ho).
+ * Agar inhe use nahi karna, inhe hata dena better hai taaki confusion na ho
+ * ki system do parallel upload paths maintain kar raha hai.
+ */
+
+/**
+ * SYSTEM 2.0 - STEP A: Video ko Facebook par DRAFT (Unpublished) upload karna
  */
 const uploadVideoAsDraft = async (pageId, pageAccessToken, videoUrl, description = "") => {
   let finalPageId = pageId;
@@ -81,7 +92,7 @@ const uploadVideoAsDraft = async (pageId, pageAccessToken, videoUrl, description
     throw new Error("Facebook Credentials completely missing or undefined!");
   }
 
-  console.log(`🚀 [FB DRAFT UPLOAD] Downloading heavy movie clip buffer for Page ID: ${finalPageId}`);
+  console.log(`🚀 [FB DRAFT UPLOAD] Downloading video buffer for Page ID: ${finalPageId}`);
 
   const videoResponse = await axios.get(videoUrl, {
     responseType: "arraybuffer",
@@ -90,7 +101,11 @@ const uploadVideoAsDraft = async (pageId, pageAccessToken, videoUrl, description
   });
   const videoBuffer = Buffer.from(videoResponse.data);
 
-  console.log(`📥 [FB DRAFT UPLOAD] File cached. Size: ${(videoBuffer.length / (1024 * 1024)).toFixed(2)} MB. Formatting multipart form...`);
+  console.log(
+    `📥 [FB DRAFT UPLOAD] File cached. Size: ${(videoBuffer.length / (1024 * 1024)).toFixed(
+      2
+    )} MB. Formatting multipart form...`
+  );
 
   const FormData = require("form-data");
   const form = new FormData();
@@ -106,23 +121,18 @@ const uploadVideoAsDraft = async (pageId, pageAccessToken, videoUrl, description
 
   console.log(`📢 [FB DRAFT UPLOAD] Sending multipart stream as DRAFT to Facebook...`);
 
-  const { data } = await axios.post(
-    `${FB_GRAPH_URL}/${finalPageId}/videos`,
-    form,
-    {
-      headers: form.getHeaders(),
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity,
-    }
-  );
+  const { data } = await axios.post(`${FB_GRAPH_URL}/${finalPageId}/videos`, form, {
+    headers: form.getHeaders(),
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity,
+  });
 
   console.log(`✅ [FB DRAFT SUCCESS] Video uploaded as Draft! Facebook Video ID: ${data.id}`);
   return data;
 };
 
 /**
- * 🎯 SYSTEM 2.0 - STEP B: Pehle se uploaded Draft video ko INSTANT PUBLIC karna
- * FIX: Token ko URL parameters me explicitly pass kiya hai taaki Permission block bypass ho jaye!
+ * SYSTEM 2.0 - STEP B: Pehle se uploaded Draft video ko publish karna
  */
 const publishDraftVideo = async (pageAccessToken, videoId) => {
   let finalToken = pageAccessToken;
@@ -133,26 +143,19 @@ const publishDraftVideo = async (pageAccessToken, videoId) => {
   }
 
   if (!finalToken || !videoId) {
-    throw new Error("Missing access token or videoId for instant publishing!");
+    throw new Error("Missing access token or videoId for publishing!");
   }
 
-  console.log(`⚡ [FB INSTANT PUBLISH] Triggering public action for Video ID: ${videoId}`);
+  console.log(`⚡ [FB PUBLISH] Triggering public action for Video ID: ${videoId}`);
 
-  // 🎯 FIX: Query string parameters me token bhejna aur 'is_published' use karna full-proof hai
   const { data } = await axios.post(
     `${FB_GRAPH_URL}/${videoId}`,
-    {
-      is_published: true // Command to make it live
-    },
-    {
-      params: {
-        access_token: finalToken // URL level authorization bypass
-      }
-    }
+    { is_published: true },
+    { params: { access_token: finalToken } }
   );
 
   console.log(`🎉 [FB PUBLISH SUCCESS] Video is now live on Page!`);
-  return data; 
+  return data;
 };
 
 module.exports = {
