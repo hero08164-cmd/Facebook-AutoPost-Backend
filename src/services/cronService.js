@@ -23,7 +23,7 @@ const timeToCronExpressionWith20MinBuffer = (time) => {
  * Dono Jobs ko schedule karne wala Master Engine
  */
 const scheduleJob = (targetTime) => {
-  // --- EVENING POST LOOP SHIFT ---
+  // --- EVENING POST LOOP ---
   if (scheduledTask) {
     scheduledTask.stop();
     console.log(`[CRON SERVICE] Purani scheduled evening job ko stop kiya gaya.`);
@@ -32,10 +32,13 @@ const scheduleJob = (targetTime) => {
   const eveningExpression = timeToCronExpressionWith20MinBuffer(targetTime);
 
   scheduledTask = cron.schedule(
-    eveningExpression, 
+    eveningExpression,
     async () => {
       console.log(`\n[CRON] ⏰ 20-Minute Window Match Hua! Evening publish action triggered...`);
-      if (isJobRunning) return;
+      if (isJobRunning) {
+        console.log(`[CRON SERVICE] ⚠️ Pehle se ek job chal raha hai, skip kar rahe hain.`);
+        return;
+      }
       try {
         isJobRunning = true;
         await runDailyPostJob();
@@ -55,16 +58,22 @@ const scheduleJob = (targetTime) => {
   }
 
   morningSyncTask = cron.schedule(
-    "0 6 * * *", // 🎯 Badlaav: Everyday sharp at 06:00 AM India Time
+    "0 6 * * *",
     async () => {
       console.log(`\n[CRON] ☀️ Sharp 6:00 AM Ho Gaya! Starting Google Drive Auto-Sync...`);
-      await runDriveToCloudinarySync();
+      try {
+        await runDriveToCloudinarySync();
+      } catch (error) {
+        console.error(`[MORNING SYNC SERVICE ERROR]:`, error.message);
+      }
     },
     { scheduled: true, timezone: "Asia/Kolkata" }
   );
 
   console.log(`[CRON SERVICE] ☀️ Morning Drive-Sync locked daily at: "06:00 AM" [IST]`);
-  console.log(`[CRON SERVICE] 🎯 Target Live Goal: ${targetTime} | Background Upload Scheduled at Expression: "${eveningExpression}" (20 Mins Earlier) [Timezone: Asia/Kolkata]`);
+  console.log(
+    `[CRON SERVICE] 🎯 Target Live Goal: ${targetTime} | Evening Publish Scheduled at Expression: "${eveningExpression}" (20 Mins Earlier) [Timezone: Asia/Kolkata]`
+  );
 };
 
 const initCronJob = async () => {
@@ -73,7 +82,7 @@ const initCronJob = async () => {
     if (!settings) {
       settings = await Settings.create({
         key: "app_settings",
-        cronTime: process.env.DEFAULT_CRON_TIME || "18:00", 
+        cronTime: process.env.DEFAULT_CRON_TIME || "18:00",
       });
     }
     scheduleJob(settings.cronTime);
