@@ -1,78 +1,104 @@
 // backend/src/services/cronService.js
 const cron = require("node-cron");
 const Settings = require("../models/Settings");
-const { runDailyPostJob } = require("../jobs/dailyPostJob");
-const { runDriveToCloudinarySync } = require("../jobs/syncDriveToCloudinaryJob"); // ☀️ Morning Sync Import
+const { runDraftUploadJob } = require("../jobs/draftUploadJob");
+const { runPublishScheduledJob } = require("../jobs/publishScheduledJob");
 
-let scheduledTask = null; // Current active evening cron
-let morningSyncTask = null; // ☀️ Subah ka task reference
-let isJobRunning = false;
+// 🎯 Draft upload kitni der PEHLE ho, target time se (long videos ke liye buffer).
+// Change karne ke liye bas yeh number badlo.
+const DRAFT_UPLOAD_BUFFER_MINUTES = 60;
 
-const timeToCronExpressionWith20MinBuffer = (time) => {
+let draftTask = null; // Draft-upload cron (target - buffer)
+let publishTask = null; // Exact-time publish cron
+let isDraftJobRunning = false;
+let isPublishJobRunning = false;
+
+/**
+ * "HH:MM" time se X minutes PEHLE ka cron expression banata hai
+ */
+const timeToCronExpressionWithBuffer = (time, bufferMinutes) => {
   let [hour, minute] = time.split(":").map(Number);
-  minute = minute - 20;
-  if (minute < 0) {
-    minute = 60 + minute;
-    hour = hour - 1;
-    if (hour < 0) hour = 23;
+  minute = minute - bufferMinutes;
+  while (minute < 0) {
+    minute += 60;
+    hour -= 1;
   }
+  while (hour < 0) hour += 24;
   return `${minute} ${hour} * * *`;
 };
 
 /**
- * Dono Jobs ko schedule karne wala Master Engine
+ * "HH:MM" time ka EXACT cron expression banata hai (bina buffer ke)
+ */
+const timeToExactCronExpression = (time) => {
+  const [hour, minute] = time.split(":").map(Number);
+  return `${minute} ${hour} * * *`;
+};
+
+/**
+ * Dono Jobs (draft-upload + exact-publish) ko schedule karne wala Master Engine
  */
 const scheduleJob = (targetTime) => {
-  // --- EVENING POST LOOP ---
-  if (scheduledTask) {
-    scheduledTask.stop();
-    console.log(`[CRON SERVICE] Purani scheduled evening job ko stop kiya gaya.`);
+  // --- PHASE 1: DRAFT UPLOAD (target time se buffer pehle) ---
+  if (draftTask) {
+    draftTask.stop();
+    console.log(`[CRON SERVICE] Purani draft-upload job ko stop kiya gaya.`);
   }
 
-  const eveningExpression = timeToCronExpressionWith20MinBuffer(targetTime);
+  const draftExpression = timeToCronExpressionWithBuffer(targetTime, DRAFT_UPLOAD_BUFFER_MINUTES);
 
-  scheduledTask = cron.schedule(
-    eveningExpression,
+  draftTask = cron.schedule(
+    draftExpression,
     async () => {
-      console.log(`\n[CRON] ⏰ 20-Minute Window Match Hua! Evening publish action triggered...`);
-      if (isJobRunning) {
-        console.log(`[CRON SERVICE] ⚠️ Pehle se ek job chal raha hai, skip kar rahe hain.`);
+      console.log(`\n[CRON] 📤 Draft-upload window hit! (${DRAFT_UPLOAD_BUFFER_MINUTES} min pehle target ke)`);
+      if (isDraftJobRunning) {
+        console.log(`[CRON SERVICE] ⚠️ Draft job pehle se chal raha hai, skip.`);
         return;
       }
       try {
-        isJobRunning = true;
-        await runDailyPostJob();
+        isDraftJobRunning = true;
+        await runDraftUploadJob();
       } catch (error) {
-        console.error(`[CRON SERVICE ERROR]:`, error.message);
+        console.error(`[CRON SERVICE ERROR - draft]:`, error.message);
       } finally {
-        isJobRunning = false;
-        console.log(`[CRON SERVICE] Evening Lock released.`);
+        isDraftJobRunning = false;
+        console.log(`[CRON SERVICE] Draft job lock released.`);
       }
     },
     { scheduled: true, timezone: "Asia/Kolkata" }
   );
 
-  // --- ☀️ MORNING DRIVE TO CLOUDINARY SYNC LOOP (Sharp 06:00 AM IST) ---
-  if (morningSyncTask) {
-    morningSyncTask.stop();
+  // --- PHASE 2: EXACT-TIME PUBLISH (target time pe bilkul exact) ---
+  if (publishTask) {
+    publishTask.stop();
+    console.log(`[CRON SERVICE] Purani publish job ko stop kiya gaya.`);
   }
 
-  morningSyncTask = cron.schedule(
-    "0 6 * * *",
+  const publishExpression = timeToExactCronExpression(targetTime);
+
+  publishTask = cron.schedule(
+    publishExpression,
     async () => {
-      console.log(`\n[CRON] ☀️ Sharp 6:00 AM Ho Gaya! Starting Google Drive Auto-Sync...`);
+      console.log(`\n[CRON] ⚡ Exact target time hit! Publish action triggered...`);
+      if (isPublishJobRunning) {
+        console.log(`[CRON SERVICE] ⚠️ Publish job pehle se chal raha hai, skip.`);
+        return;
+      }
       try {
-        await runDriveToCloudinarySync();
+        isPublishJobRunning = true;
+        await runPublishScheduledJob();
       } catch (error) {
-        console.error(`[MORNING SYNC SERVICE ERROR]:`, error.message);
+        console.error(`[CRON SERVICE ERROR - publish]:`, error.message);
+      } finally {
+        isPublishJobRunning = false;
+        console.log(`[CRON SERVICE] Publish job lock released.`);
       }
     },
     { scheduled: true, timezone: "Asia/Kolkata" }
   );
 
-  console.log(`[CRON SERVICE] ☀️ Morning Drive-Sync locked daily at: "06:00 AM" [IST]`);
   console.log(
-    `[CRON SERVICE] 🎯 Target Live Goal: ${targetTime} | Evening Publish Scheduled at Expression: "${eveningExpression}" (20 Mins Earlier) [Timezone: Asia/Kolkata]`
+    `[CRON SERVICE] 🎯 Target Live Goal: ${targetTime} | Draft Upload: "${draftExpression}" (${DRAFT_UPLOAD_BUFFER_MINUTES} min pehle) | Exact Publish: "${publishExpression}" [Timezone: Asia/Kolkata]`
   );
 };
 
