@@ -1,17 +1,22 @@
 // backend/src/services/cronService.js
 const cron = require("node-cron");
 const Settings = require("../models/Settings");
-const { runDraftUploadJob } = require("../jobs/draftUploadJob");
-const { runPublishScheduledJob } = require("../jobs/publishScheduledJob");
+const { runScheduledUploadJob } = require("../jobs/scheduledUploadJob");
+const { runVerifyScheduledJob } = require("../jobs/verifyScheduledJob");
 
-// 🎯 Draft upload kitni der PEHLE ho, target time se (long videos ke liye buffer).
-// Change karne ke liye bas yeh number badlo.
-const DRAFT_UPLOAD_BUFFER_MINUTES = 60;
+// Upload kitni der PEHLE ho, target time se (long videos ko processing time dene ke liye).
+// Publishing khud Facebook apne native scheduler se exact target time pe karega —
+// isliye humein alag se "publish" cron ki zaroorat nahi.
+const UPLOAD_BUFFER_MINUTES = 60;
 
-let draftTask = null; // Draft-upload cron (target - buffer)
-let publishTask = null; // Exact-time publish cron
-let isDraftJobRunning = false;
-let isPublishJobRunning = false;
+// Har kitni der mein verify karein ki scheduled videos actually publish hui ya nahi
+const VERIFY_INTERVAL_MINUTES = 15;
+
+let uploadTask = null;
+let verifyTask = null;
+let currentTargetTime = null;
+let isUploadJobRunning = false;
+let isVerifyJobRunning = false;
 
 /**
  * "HH:MM" time se X minutes PEHLE ka cron expression banata hai
@@ -28,77 +33,65 @@ const timeToCronExpressionWithBuffer = (time, bufferMinutes) => {
 };
 
 /**
- * "HH:MM" time ka EXACT cron expression banata hai (bina buffer ke)
- */
-const timeToExactCronExpression = (time) => {
-  const [hour, minute] = time.split(":").map(Number);
-  return `${minute} ${hour} * * *`;
-};
-
-/**
- * Dono Jobs (draft-upload + exact-publish) ko schedule karne wala Master Engine
+ * Upload cron (buffer pehle) + Verify cron (periodic) schedule karta hai.
+ * Actual PUBLISH TIME Facebook khud apne native scheduler se control karta hai
+ * (scheduled_publish_time parameter ke through) — humara code sirf upload
+ * aur baad mein verification handle karta hai.
  */
 const scheduleJob = (targetTime) => {
-  // --- PHASE 1: DRAFT UPLOAD (target time se buffer pehle) ---
-  if (draftTask) {
-    draftTask.stop();
-    console.log(`[CRON SERVICE] Purani draft-upload job ko stop kiya gaya.`);
+  currentTargetTime = targetTime;
+
+  // --- UPLOAD CRON (target se buffer pehle) ---
+  if (uploadTask) {
+    uploadTask.stop();
+    console.log(`[CRON SERVICE] Purani upload job ko stop kiya gaya.`);
   }
 
-  const draftExpression = timeToCronExpressionWithBuffer(targetTime, DRAFT_UPLOAD_BUFFER_MINUTES);
+  const uploadExpression = timeToCronExpressionWithBuffer(targetTime, UPLOAD_BUFFER_MINUTES);
 
-  draftTask = cron.schedule(
-    draftExpression,
+  uploadTask = cron.schedule(
+    uploadExpression,
     async () => {
-      console.log(`\n[CRON] 📤 Draft-upload window hit! (${DRAFT_UPLOAD_BUFFER_MINUTES} min pehle target ke)`);
-      if (isDraftJobRunning) {
-        console.log(`[CRON SERVICE] ⚠️ Draft job pehle se chal raha hai, skip.`);
+      console.log(`\n[CRON] 📤 Upload window hit! (${UPLOAD_BUFFER_MINUTES} min pehle target ke)`);
+      if (isUploadJobRunning) {
+        console.log(`[CRON SERVICE] ⚠️ Upload job pehle se chal raha hai, skip.`);
         return;
       }
       try {
-        isDraftJobRunning = true;
-        await runDraftUploadJob();
+        isUploadJobRunning = true;
+        await runScheduledUploadJob(currentTargetTime);
       } catch (error) {
-        console.error(`[CRON SERVICE ERROR - draft]:`, error.message);
+        console.error(`[CRON SERVICE ERROR - upload]:`, error.message);
       } finally {
-        isDraftJobRunning = false;
-        console.log(`[CRON SERVICE] Draft job lock released.`);
+        isUploadJobRunning = false;
+        console.log(`[CRON SERVICE] Upload job lock released.`);
       }
     },
     { scheduled: true, timezone: "Asia/Kolkata" }
   );
 
-  // --- PHASE 2: EXACT-TIME PUBLISH (target time pe bilkul exact) ---
-  if (publishTask) {
-    publishTask.stop();
-    console.log(`[CRON SERVICE] Purani publish job ko stop kiya gaya.`);
+  // --- VERIFY CRON (har VERIFY_INTERVAL_MINUTES mein chalta hai, independent) ---
+  if (!verifyTask) {
+    verifyTask = cron.schedule(
+      `*/${VERIFY_INTERVAL_MINUTES} * * * *`,
+      async () => {
+        if (isVerifyJobRunning) return;
+        try {
+          isVerifyJobRunning = true;
+          await runVerifyScheduledJob();
+        } catch (error) {
+          console.error(`[CRON SERVICE ERROR - verify]:`, error.message);
+        } finally {
+          isVerifyJobRunning = false;
+        }
+      },
+      { scheduled: true, timezone: "Asia/Kolkata" }
+    );
+    console.log(`[CRON SERVICE] 🔍 Verify job set: har ${VERIFY_INTERVAL_MINUTES} minute mein chalega.`);
   }
-
-  const publishExpression = timeToExactCronExpression(targetTime);
-
-  publishTask = cron.schedule(
-    publishExpression,
-    async () => {
-      console.log(`\n[CRON] ⚡ Exact target time hit! Publish action triggered...`);
-      if (isPublishJobRunning) {
-        console.log(`[CRON SERVICE] ⚠️ Publish job pehle se chal raha hai, skip.`);
-        return;
-      }
-      try {
-        isPublishJobRunning = true;
-        await runPublishScheduledJob();
-      } catch (error) {
-        console.error(`[CRON SERVICE ERROR - publish]:`, error.message);
-      } finally {
-        isPublishJobRunning = false;
-        console.log(`[CRON SERVICE] Publish job lock released.`);
-      }
-    },
-    { scheduled: true, timezone: "Asia/Kolkata" }
-  );
 
   console.log(
-    `[CRON SERVICE] 🎯 Target Live Goal: ${targetTime} | Draft Upload: "${draftExpression}" (${DRAFT_UPLOAD_BUFFER_MINUTES} min pehle) | Exact Publish: "${publishExpression}" [Timezone: Asia/Kolkata]`
+    `[CRON SERVICE] 🎯 Target Live Goal: ${targetTime} | Upload Window: "${uploadExpression}" (${UPLOAD_BUFFER_MINUTES} min pehle) | Actual publish Facebook ke native scheduler se hoga [Timezone: Asia/Kolkata]`
   );
 };
 
