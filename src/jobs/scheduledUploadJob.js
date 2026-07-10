@@ -2,12 +2,14 @@
 const Video = require("../models/Video");
 const FacebookAccount = require("../models/FacebookAccount");
 const PostHistory = require("../models/PostHistory");
-const { deleteVideoFromCloudinary } = require("../services/cloudinaryService");
 const { isValidMp4Buffer } = require("./syncDriveToCloudinaryJob");
 const axios = require("axios");
 const FormData = require("form-data");
 
 const FB_GRAPH_URL = "https://graph.facebook.com/v21.0";
+
+// India timezone offset — fixed, kabhi DST nahi badalta (5 ghante 30 minute)
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 /**
  * ⚠️ IMPORTANT FIX (root-cause correction):
@@ -19,37 +21,51 @@ const FB_GRAPH_URL = "https://graph.facebook.com/v21.0";
  * Sahi tareeka: EK hi upload call mein `published: false` + `scheduled_publish_time`
  * (future Unix timestamp) bhejo. Facebook khud us exact time pe organic content ke
  * roop mein publish karega — koi second "publish" cron ki zaroorat nahi.
- *
- * Yeh job target time se BUFFER_MINUTES pehle chalta hai (default 60 min) taaki
- * lambi videos ko upload+processing ka time mil jaaye, lekin publish khud Facebook
- * apne system se exact scheduled_publish_time pe karega.
  */
 
 /**
- * "HH:MM" (IST) target time ko aaj/kal ke Unix timestamp mein convert karta hai.
- * Agar target time already nikal chuka hai aaj ke liye, to kal ke liye set karta hai.
+ * "HH:MM" (IST) target time ko REAL Unix timestamp mein convert karta hai.
+ *
+ * ⚠️ BUG FIX: Purana version `toLocaleString()` + server ke local timezone (Date object
+ * getters/setters) pe depend karta tha — Render ka server UTC mein chalta hai, isliye
+ * calculation mein double-shift ho raha tha (video 5.5 ghante LATE publish ho rahi thi).
+ * Yeh naya version sirf fixed +5:30 offset ka pure math use karta hai — server ka
+ * local timezone kuch bhi ho, result hamesha sahi rahega.
  */
 const getNextTargetUnixTimestamp = (targetTimeHHMM) => {
   const [targetHour, targetMinute] = targetTimeHHMM.split(":").map(Number);
 
-  // IST mein abhi ka time nikalo
-  const nowIST = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  const nowUTCms = Date.now();
+  const istNowMs = nowUTCms + IST_OFFSET_MS; // "IST wall-clock" number, UTC ke roop mein represent
+  const istNowDate = new Date(istNowMs);
 
-  const targetDate = new Date(nowIST);
-  targetDate.setHours(targetHour, targetMinute, 0, 0);
+  // Aaj ki date (IST wall-clock ke hisab se) lekar target hour:minute set karo — sab UTC getters/setters
+  // use kiye taaki server ka apna local timezone bilkul bhi impact na kare.
+  let istTargetMs = Date.UTC(
+    istNowDate.getUTCFullYear(),
+    istNowDate.getUTCMonth(),
+    istNowDate.getUTCDate(),
+    targetHour,
+    targetMinute,
+    0,
+    0
+  );
 
   // Agar target time IST mein already beet chuka hai aaj, to kal ke liye set karo
-  if (targetDate <= nowIST) {
-    targetDate.setDate(targetDate.getDate() + 1);
+  if (istTargetMs <= istNowMs) {
+    istTargetMs += 24 * 60 * 60 * 1000;
   }
+
+  // "IST wall-clock" number ko wapas REAL UTC epoch mein convert karo
+  let realTargetUTCms = istTargetMs - IST_OFFSET_MS;
 
   // Facebook ka scheduled_publish_time minimum 10 minute future hona chahiye
-  const minAllowed = new Date(nowIST.getTime() + 11 * 60 * 1000);
-  if (targetDate < minAllowed) {
-    targetDate.setTime(minAllowed.getTime());
+  const minAllowedUTCms = nowUTCms + 11 * 60 * 1000;
+  if (realTargetUTCms < minAllowedUTCms) {
+    realTargetUTCms = minAllowedUTCms;
   }
 
-  return Math.floor(targetDate.getTime() / 1000);
+  return Math.floor(realTargetUTCms / 1000);
 };
 
 const runScheduledUploadJob = async (targetTimeHHMM) => {
@@ -68,7 +84,6 @@ const runScheduledUploadJob = async (targetTimeHHMM) => {
 
     const token = fbAccount.accessToken || fbAccount.pageAccessToken;
 
-    // Sirf Cloudinary-backed ("manual") pending videos
     currentVideo = await Video.findOne({ status: "pending", source: "manual" }).sort({ createdAt: 1 });
 
     if (!currentVideo) {
@@ -124,25 +139,17 @@ const runScheduledUploadJob = async (targetTimeHHMM) => {
     console.log(`[SCHEDULE JOB] ✅ Facebook ne schedule confirm kar diya. Video ID: ${fbVideoId}`);
     console.log(`[SCHEDULE JOB] 🎉 Yeh video khud Facebook apne system se exact time pe publish karega.`);
 
-    // Yahan hum "posted" mark nahi karte — video abhi bhi Facebook ke paas scheduled state mein hai.
-    // Naya status: "scheduled" — taaki tracking clear rahe ki yeh Facebook ke bharose pe hai ab.
     currentVideo.status = "scheduled";
     currentVideo.fbVideoId = fbVideoId;
     currentVideo.isUploadedAsDraft = true;
     await currentVideo.save();
 
-    // Cloudinary cleanup abhi NAHI karenge — Facebook processing complete hone tak file
-    // Cloudinary pe rehne dena safer hai (agar schedule fail ho to retry ke liye source bacha rahega).
-    // Cleanup ek alag verification job mein hoga jab Facebook confirm kare video "ready"/live hai.
+    // ⚠️ BUG FIX: PostHistory model ke "status" enum mein "scheduled" valid value nahi hai
+    // (sirf "success"/"failed" allowed hain), isliye yahan PostHistory create NAHI karte.
+    // Confirmed "success" entry verifyScheduledJob.js banayega jab Facebook actually
+    // publish confirm kar de — yeh zyada accurate bhi hai (upload ≠ confirmed live).
 
-    await PostHistory.create({
-      videoRef: currentVideo._id,
-      videoTitle: currentVideo.title,
-      source: currentVideo.source,
-      status: "scheduled",
-      fbPostId: fbVideoId,
-      postedAt: new Date(scheduledTimestamp * 1000),
-    });
+    // Cloudinary cleanup bhi yahan NAHI karte — verifyScheduledJob confirm hone ke baad karega.
   } catch (err) {
     const errMsg = err.response?.data?.error?.message || err.message;
     console.error("[SCHEDULE JOB CRASH] ❌", errMsg);
@@ -160,7 +167,7 @@ const runScheduledUploadJob = async (targetTimeHHMM) => {
       status: "failed",
       errorMessage: errMsg,
       postedAt: new Date(),
-    });
+    }).catch((e) => console.error("[SCHEDULE JOB] PostHistory log warning:", e.message));
   }
 };
 
